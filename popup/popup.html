@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <link rel="stylesheet" href="popup.css" />
+    <script src="../solver.js"></script>
+    <script src="popup.js" type="module"></script>
+    <title>Hitbullseye Automate</title>
+</head>
+
+<body>
+    <header class="header">
+        <img src="../images/icon48.png" alt="" class="logo" />
+        <div class="brand">
+            <h1>Hitbullseye Automate</h1>
+            <p>AI test solver</p>
+        </div>
+        <span class="version">v4.0</span>
+    </header>
+
+    <main>
+        <section class="card">
+            <div class="card-title">
+                <span>AI key</span>
+                <button class="link-btn" id="test_key">Test key</button>
+            </div>
+            <div class="field-row">
+                <input type="password" id="api_key" placeholder="Paste your Gemini or Anthropic key" autocomplete="off" spellcheck="false" />
+                <button class="icon-btn" id="toggle_key" title="Show / hide key" aria-label="Show or hide key">
+                    <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+                </button>
+            </div>
+            <p class="hint">Only needed when the answer key below is empty.</p>
+        </section>
+
+        <section class="card">
+            <div class="card-title"><span>Answer key <em>optional</em></span></div>
+            <input type="text" id="test_answer_key" placeholder="ABCDA  or  1=B,2=D,3=42.5" spellcheck="false" />
+            <p class="hint">Leave empty to let the AI solve the test.</p>
+        </section>
+
+        <section class="card">
+            <div class="setting">
+                <label for="time">Delay per question</label>
+                <span class="badge" id="time_value">1s</span>
+            </div>
+            <input type="range" id="time" min="0.3" max="10" value="1" step="0.1" />
+            <div class="setting">
+                <label for="auto_submit">Auto-submit when done</label>
+                <label class="switch">
+                    <input type="checkbox" id="auto_submit" checked />
+                    <span class="slider"></span>
+                </label>
+            </div>
+        </section>
+
+        <div class="actions">
+            <button class="btn btn-primary" id="start">
+                <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
+                Start
+            </button>
+            <button class="btn btn-outline" id="stop">
+                <svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>
+                Stop
+            </button>
+        </div>
+        <button class="btn btn-ghost" id="copy_questions">
+            <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+            Copy questions for an AI chat
+        </button>
+
+        <div id="status" class="status" hidden></div>
+    </main>
+
+    <footer>Made by ethical hacker</footer>
+</body>
+
+</html>
