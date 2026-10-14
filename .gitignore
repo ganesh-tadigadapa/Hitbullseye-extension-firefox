@@ -1,0 +1,4 @@
+.DS_Store
+*.zip
+*.xpi
+node_modules/
