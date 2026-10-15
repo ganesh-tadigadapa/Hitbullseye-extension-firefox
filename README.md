@@ -1,4 +1,4 @@
-# Hitbullseye Automate Tool
+# Hitbullseye Automate Tool - enjoy guyss
 
 A browser extension that solves tests on [hitbullseye.com](https://www.hitbullseye.com/) with AI. It reads every question on the test page, gets the answers from Google Gemini (or Anthropic Claude), and fills them in for you: it clicks the option for multiple-choice questions and types the number for numerical ones.
 
