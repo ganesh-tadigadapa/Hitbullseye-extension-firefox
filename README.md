@@ -2,13 +2,9 @@
 
 ### Step 1 — Install, Activate, and Pin Always Active Window 🔵
 
-1. Open the official Firefox Add-ons page: **[Always Active Window (Always Visible)](https://addons.mozilla.org/en-US/firefox/addon/always-visible/)**.
-2. Click **Add to Firefox** and confirm the installation.
-3. pin it too the tool bar
-7. Confirm that the icon turns **blue**. This indicates that the extension is active for the current page.
-8. If the icon does not turn blue, check the extension's settings and try again.
-
-**Important:** Install and pin this extension before continuing. Its purpose is to make the page appear active even when you switch tabs. <https://addons.mozilla.org/en-US/firefox/addon/always-visible/>
+1.  [Always Active Window](https://addons.mozilla.org/en-US/firefox/addon/always-visible/)**,
+2. pin it to the toolbar, open your test page and click its icon until it turns **blue**.
+**Important:** Install and pin this extension before continuing. Its purpose is to make the page appear active even when you switch tabs. 
 ![image alt](https://github.com/ganesh-tadigadapa/Hitbullseye-extension-firefox/blob/2ccaa4843ea85bf42e4b5723a774144c094de416/Installing%20and%20Activating%20Always%20Visible%20Firefox%20Extension.png)
 
 ### Step 2 — Download Hitbullseye Automate Tool
