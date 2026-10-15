@@ -12,6 +12,7 @@
 8. If the icon does not turn blue, check the extension's settings and try again.
 
 **Important:** Install and pin this extension before continuing. Its purpose is to make the page appear active even when you switch tabs. <https://addons.mozilla.org/en-US/firefox/addon/always-visible/>
+![image alt](https://github.com/ganesh-tadigadapa/Hitbullseye-extension-firefox/blob/2ccaa4843ea85bf42e4b5723a774144c094de416/Installing%20and%20Activating%20Always%20Visible%20Firefox%20Extension.png)
 
 ### Step 2 — Download Hitbullseye Automate Tool
 
