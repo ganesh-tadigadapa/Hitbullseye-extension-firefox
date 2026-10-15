@@ -15,7 +15,7 @@
 
 ### Step 3 — Install Hitbullseye Automate Tool
 
-1. Open Firefox and copy paste this in url -- 
+1. Open Firefox and copy paste this whole about thing in url -- 
       about:debugging#/runtime/this-firefox 
    
 3. Click **Load Temporary Add-on...**.
