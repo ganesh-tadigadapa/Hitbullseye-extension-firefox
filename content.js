@@ -164,11 +164,16 @@ if (!globalThis.__hbAutomateLoaded) {
             const parts = [...n.children].filter((c) => c.textContent.trim() && !/^[/⁄]$/.test(c.textContent.trim()));
             if (parts.length === 2 && parts.every(short)) n.replaceWith(fraction(parts[0].textContent, parts[1].textContent));
         });
-        // Fractions laid out as a two-row, one-column table (numerator over denominator)
+        // Fractions laid out as a table: numerator over denominator, optionally with the whole number
+        // of a mixed fraction in a cell spanning both rows
         copy.querySelectorAll("table").forEach((n) => {
             const rows = [...n.rows];
-            if (!n.querySelector("input, img") && rows.length === 2 && rows.every((r) => r.cells.length === 1 && short(r))) {
-                n.replaceWith(fraction(rows[0].textContent, rows[1].textContent));
+            if (n.querySelector("input, img") || rows.length !== 2 || !rows.every(short)) return;
+            const [top, bottom] = rows.map((r) => [...r.cells]);
+            if (top.length === 1 && bottom.length === 1) {
+                n.replaceWith(fraction(top[0].textContent, bottom[0].textContent));
+            } else if (top.length === 2 && top[0].rowSpan === 2 && bottom.length === 1) {
+                n.replaceWith(` ${top[0].textContent.trim()} ${fraction(top[1].textContent, bottom[0].textContent)}`);
             }
         });
         const imgs = [...copy.querySelectorAll("img")];
