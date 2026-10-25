@@ -188,6 +188,17 @@ if (!globalThis.__hbAutomateLoaded) {
             if (/√$/.test(textBefore(n))) n.replaceWith(`(${t})`);
             else if (/\.\d*$/.test(textBefore(n)) && /^\d+$/.test(t)) n.replaceWith(`(${t})`);
         });
+        // Fractions stacked with a border as the fraction bar: the numerator has a bottom border
+        // or the denominator a top border
+        const parts = (n) => [...n.childNodes].filter((c) => c.nodeName === "BR" || c.textContent.trim());
+        [...copy.querySelectorAll("[style*=border]")].reverse().forEach((n) => {
+            const parent = n.parentElement;
+            if (!parent || !copy.contains(parent)) return;
+            const kids = parts(parent);
+            const style = n.getAttribute("style") || "";
+            const isBar = (/border-bottom/.test(style) && kids[0] === n) || (/border-top/.test(style) && kids[1] === n);
+            if (kids.length === 2 && isBar && kids.every(short)) parent.replaceWith(fraction(kids[0].textContent, kids[1].textContent));
+        });
         const imgs = [...copy.querySelectorAll("img")];
         imgs.forEach((n, k) => {
             const alt = (n.getAttribute("alt") || n.getAttribute("title") || "").trim();
