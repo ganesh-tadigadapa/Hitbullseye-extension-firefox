@@ -32,22 +32,11 @@ document.addEventListener('DOMContentLoaded', function () {
     });
 
     test_key.addEventListener("click", async function () {
-        status("Testing key... this can take up to 45 seconds. Keep this popup open.");
+        status("Testing key...");
         test_key.disabled = true;
         try {
-            const timeout = new Promise((_, reject) =>
-                setTimeout(() => reject(new Error("No answer within 45 seconds. Gemini is probably slow or busy right now; try again in a minute.")), 45000)
-            );
-            const index = await Promise.race([
-                HBSolver.solve(
-                    { text: "What is 2 + 2?", options: ["3", "4", "5", "6"], images: [] },
-                    api_key.value.trim(),
-                    0
-                ),
-                timeout,
-            ]);
-            if (index === 1) status(`Key works ✅ (answered by ${HBSolver.lastModel()})`, "ok");
-            else status(`Key works, but the model answered ${String.fromCharCode(65 + index)} to 2 + 2`, "error");
+            const provider = await HBSolver.testKey(api_key.value.trim());
+            status(`Key works ✅ (${provider})`, "ok");
         } catch (err) {
             status(err.message, "error");
         } finally {

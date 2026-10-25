@@ -3,6 +3,7 @@ if (!globalThis.__hbAutomateLoaded) {
     globalThis.__hbAutomateLoaded = true;
 
     let running = false;
+    let runId = 0; // bumped on every start, so a stopped run that's still sleeping can't keep going
 
     chrome.runtime.onMessage.addListener(function (request, sender, sendResponse) {
         if (request.message === "ping") {
@@ -42,6 +43,7 @@ if (!globalThis.__hbAutomateLoaded) {
     const clean = (s) => (s || "").replace(/\s+/g, " ").trim();
     const radiosFor = (i) => [...document.querySelectorAll(`input[type="radio"][name="radio_${i}"]`)];
 
+    const MAX_IMAGES = 12; // per question
     const ANSWER_BOX = 'input:not([type]), input[type="text"], input[type="number"], input[type="tel"], textarea';
 
     function currentQuestionNumber() {
@@ -96,19 +98,97 @@ if (!globalThis.__hbAutomateLoaded) {
         return Math.max(max, total ? parseInt(total[1], 10) : 0);
     }
 
-    // Text of an element with superscripts/subscripts kept readable: 180<sup>0</sup> -> "180^0" instead of "1800"
-    function readableText(el) {
-        if (!el.querySelector || !el.querySelector("sup, sub")) return el.innerText || el.textContent;
-        const copy = el.cloneNode(true);
-        copy.querySelectorAll("sup").forEach((n) => n.replaceWith(`^${n.textContent}`));
-        copy.querySelectorAll("sub").forEach((n) => n.replaceWith(`_${n.textContent}`));
-        return copy.textContent;
+    const VULGAR_FRACTIONS = {
+        "½": "1/2", "⅓": "1/3", "⅔": "2/3", "¼": "1/4", "¾": "3/4", "⅕": "1/5", "⅖": "2/5", "⅗": "3/5", "⅘": "4/5",
+        "⅙": "1/6", "⅚": "5/6", "⅐": "1/7", "⅛": "1/8", "⅜": "3/8", "⅝": "5/8", "⅞": "7/8", "⅑": "1/9", "⅒": "1/10",
+    };
+    const SUPERSCRIPT_DIGITS = "⁰¹²³⁴⁵⁶⁷⁸⁹";
+    const SUBSCRIPT_DIGITS = "₀₁₂₃₄₅₆₇₈₉";
+    const plainDigits = (s, set) => [...s].map((ch) => set.indexOf(ch)).join("");
+
+    // Plain-text math the page may use: "2⅓" -> "2 1/3", "¹⁄₃" -> "1/3", fraction slash -> "/"
+    function normalizeMath(text) {
+        return text
+            .replace(/(\d?)\s*([½⅓⅔¼¾⅕⅖⅗⅘⅙⅚⅐⅛⅜⅝⅞⅑⅒])/g, (_, whole, f) => (whole ? `${whole} ` : " ") + VULGAR_FRACTIONS[f])
+            .replace(/([⁰¹²³⁴⁵⁶⁷⁸⁹]+)\s*[⁄/]\s*([₀₁₂₃₄₅₆₇₈₉]+)/g, (_, a, b) =>
+                ` ${plainDigits(a, SUPERSCRIPT_DIGITS)}/${plainDigits(b, SUBSCRIPT_DIGITS)}`
+            )
+            .replace(/⁄/g, "/");
     }
 
-    function optionText(radio, name) {
+    // A fraction as text: " 2/7 ", or " (x+1)/(x-1) " when a part is more than one number or word, so that
+    // a whole number right before it reads as a mixed fraction ("5 2/7") rather than a multiplication
+    const fraction = (a, b) => {
+        const wrap = (p) => (/^[\w.]+$/.test(p.trim()) ? p.trim() : `(${p.trim()})`);
+        return ` ${wrap(a)}/${wrap(b)} `;
+    };
+
+    // MathML (also what MathJax 3 keeps for screen readers) as plain text
+    function mathToText(node) {
+        const kids = [...node.children];
+        const t = (n) => (n ? mathToText(n) : "");
+        switch (node.localName) {
+            case "mfrac": return fraction(t(kids[0]), t(kids[1]));
+            case "msqrt": return `sqrt(${kids.map(t).join("")})`;
+            case "mroot": return `root${t(kids[1])}(${t(kids[0])})`;
+            case "msup": return `${t(kids[0])}^(${t(kids[1])})`;
+            case "msub": return `${t(kids[0])}_(${t(kids[1])})`;
+            case "annotation": case "annotation-xml": return "";
+            case "semantics": return t(kids[0]);
+            default: return kids.length ? kids.map(t).join("") : node.textContent;
+        }
+    }
+
+    // Text of an element with math kept readable: 180<sup>0</sup> -> "180^0" instead of "1800",
+    // 2<sup>1</sup>/<sub>3</sub> -> "2 1/3" (a mixed fraction), stacked fractions -> "a/b", and images
+    // either as their alt text or as "[image N]" when `imageIndex` says image N is attached for that <img>
+    function readableText(el, imageIndex = []) {
+        if (!el.querySelector || !el.querySelector("sup, sub, math, img, table, [class*=frac], script[type^='math/tex']")) {
+            return normalizeMath(el.innerText || el.textContent);
+        }
+        const copy = el.cloneNode(true);
+        // MathJax 2 keeps the TeX source in a script tag next to the rendered copy: use the source
+        copy.querySelectorAll("script[type^='math/tex']").forEach((n) => n.replaceWith(` ${n.textContent} `));
+        copy.querySelectorAll(".MathJax_Preview, .MathJax, .MathJax_Display, .MathJax_SVG, .MathJax_CHTML").forEach((n) => n.remove());
+        copy.querySelectorAll("mjx-container").forEach((n) => {
+            const math = n.querySelector("math");
+            n.replaceWith(math ? ` ${mathToText(math)} ` : n.textContent);
+        });
+        copy.querySelectorAll("math").forEach((n) => n.replaceWith(` ${mathToText(n)} `));
+        // Fractions built from elements: <span class="frac"><span>1</span><span>3</span></span>
+        copy.querySelectorAll("[class*=frac]").forEach((n) => {
+            const parts = [...n.children].filter((c) => c.textContent.trim() && !/^[/⁄]$/.test(c.textContent.trim()));
+            if (parts.length === 2 && parts.every((c) => c.textContent.trim().length <= 20)) n.replaceWith(fraction(parts[0].textContent, parts[1].textContent));
+        });
+        // Fractions laid out as a two-row, one-column table (numerator over denominator)
+        copy.querySelectorAll("table").forEach((n) => {
+            const rows = [...n.rows];
+            if (!n.querySelector("input, img") && rows.length === 2 && rows.every((r) => r.cells.length === 1 && r.textContent.trim().length <= 20)) {
+                n.replaceWith(fraction(rows[0].textContent, rows[1].textContent));
+            }
+        });
+        const imgs = [...copy.querySelectorAll("img")];
+        imgs.forEach((n, k) => {
+            const alt = (n.getAttribute("alt") || n.getAttribute("title") || "").trim();
+            if (imageIndex[k] !== undefined) n.replaceWith(` [image ${imageIndex[k] + 1}${alt ? `: ${alt}` : ""}] `);
+            else if (alt && !/^(image|img|pic|photo)?\s*\d*$/i.test(alt)) n.replaceWith(` ${alt} `);
+        });
+        // Mixed/simple fractions written with sup and sub: 2<sup>1</sup>/<sub>3</sub> -> "2 1/3"
+        copy.querySelectorAll("sup").forEach((n) => n.replaceWith(`^{${n.textContent.trim()}}`));
+        copy.querySelectorAll("sub").forEach((n) => n.replaceWith(`_{${n.textContent.trim()}}`));
+        let text = copy.textContent.replace(/\^\{([^}]*)\}\s*[/⁄]?\s*_\{([^}]*)\}/g, " $1/$2");
+        text = text.replace(/\^\{([^}]*)\}/g, (_, p) => (/^\w+$/.test(p) ? `^${p}` : `^(${p})`));
+        text = text.replace(/_\{([^}]*)\}/g, (_, p) => (/^\w+$/.test(p) ? `_${p}` : `_(${p})`));
+        return normalizeMath(text);
+    }
+
+    // `imagesOf(el)` gives the attached-image number for each <img> inside el, so an option shown as a
+    // picture (often a fraction) reads "[image N]" and the AI can look at it instead of seeing nothing
+    function optionText(radio, name, imagesOf = () => []) {
+        const read = (el) => clean(readableText(el, imagesOf(el)));
         if (radio.id) {
             const label = document.querySelector(`label[for="${CSS.escape(radio.id)}"]`);
-            if (label && clean(label.textContent)) return clean(readableText(label));
+            if (label && read(label)) return read(label);
         }
 
         // Largest ancestor that holds only this one option (e.g. the option's row)
@@ -116,20 +196,24 @@ if (!globalThis.__hbAutomateLoaded) {
         while (el.parentElement && el.parentElement.querySelectorAll(`input[type="radio"][name="${name}"]`).length === 1) {
             el = el.parentElement;
         }
-        if (clean(el.textContent)) return clean(readableText(el));
+        if (read(el)) return read(el);
 
         // Options laid out as "<input> text <br> <input> text ..." in one container
         let text = "";
         for (let node = radio.nextSibling; node; node = node.nextSibling) {
             if (node.nodeName === "INPUT" || node.nodeName === "BR") break;
-            text += node.textContent;
+            if (node.nodeName === "IMG") {
+                const [k] = imagesOf(node);
+                text += k !== undefined ? ` [image ${k + 1}] ` : ` ${node.alt || ""} `;
+            } else text += node.nodeType === Node.ELEMENT_NODE ? readableText(node, imagesOf(node)) : node.textContent;
         }
         return clean(text) || radio.value;
     }
 
     function imageToDataUrl(img) {
         try {
-            if (!img.complete || img.naturalWidth < 40 || img.naturalHeight < 20) return null;
+            // Small images are kept too: tests often show fractions and formulas as little inline pictures
+            if (!img.complete || img.naturalWidth < 8 || img.naturalHeight < 8) return null;
             const canvas = document.createElement("canvas");
             canvas.width = img.naturalWidth;
             canvas.height = img.naturalHeight;
@@ -143,7 +227,6 @@ if (!globalThis.__hbAutomateLoaded) {
     function extractQuestion(i, target = targetFor(i)) {
         const name = `radio_${i}`;
         const inputs = target.kind === "mcq" ? target.radios : [target.box];
-        const options = target.kind === "mcq" ? target.radios.map((r) => optionText(r, name)) : [];
 
         // Largest ancestor that contains this question's inputs but no other question's
         const hasOtherQuestion = (el) =>
@@ -154,8 +237,17 @@ if (!globalThis.__hbAutomateLoaded) {
             block = block.parentElement;
         }
 
-        const images = [...block.querySelectorAll("img")].map(imageToDataUrl).filter(Boolean).slice(0, 4);
-        return { text: clean(readableText(block)).slice(0, 8000), options, images };
+        // Images are attached after the question, and "[image N]" in the text marks where each one sits
+        const images = [];
+        const blockImages = [...block.querySelectorAll("img")];
+        const imageIndex = blockImages.map((img) => {
+            const dataUrl = images.length < MAX_IMAGES ? imageToDataUrl(img) : null;
+            return dataUrl ? images.push(dataUrl) - 1 : undefined;
+        });
+        const imagesOf = (el) =>
+            (el.nodeName === "IMG" ? [el] : [...el.querySelectorAll("img")]).map((img) => imageIndex[blockImages.indexOf(img)]);
+        const options = target.kind === "mcq" ? target.radios.map((r) => optionText(r, name, imagesOf)) : [];
+        return { text: clean(readableText(block, imageIndex)).slice(0, 8000), options, images };
     }
 
     function exportQuestions() {
@@ -259,10 +351,13 @@ if (!globalThis.__hbAutomateLoaded) {
     }
 
     const attempt = async (key, time, autoSubmit) => {
+        const id = ++runId;
         running = true;
+        const active = () => running && id === runId;
         const delay = Math.max(time || 1, 0.3) * 1000;
         const total = countQuestions();
         let answers = {}; // question number -> option index, option letter (from a key) or number string
+        const asked = new Set(); // questions already sent to the AI, so the loop below doesn't ask again
 
         if (key) {
             answers = parseKey(key, total);
@@ -274,23 +369,35 @@ if (!globalThis.__hbAutomateLoaded) {
                 const target = targetFor(i);
                 if (target) present.push([i, target]);
             }
-            toast(`Solving ${present.length} questions... (can take up to a minute)`);
-            try {
-                const result = await solveQuestions(present.map(([i, target]) => extractQuestion(i, target)));
-                if (HBSolver.lastModel()) toast(`Solved with ${HBSolver.lastModel()}`);
-                present.forEach(([i], n) => {
+            toast(`Solving ${present.length} questions in one request...`);
+            const solveInto = async (list) => {
+                const result = await solveQuestions(list.map(([i, target]) => extractQuestion(i, target)));
+                list.forEach(([i], n) => {
+                    asked.add(i);
                     if (result[n] !== null && result[n] !== undefined) answers[i] = result[n];
                 });
+            };
+            try {
+                await solveInto(present);
+                if (HBSolver.lastModel()) toast(`Solved with ${HBSolver.lastModel()}`);
+                // Questions the AI skipped get one more try, all together in a single request
+                const skipped = present.filter(([i]) => answers[i] === undefined);
+                if (skipped.length && active()) {
+                    toast(`Retrying ${skipped.length} unanswered question(s) in one request...`);
+                    await solveInto(skipped).catch((err) => toast(err.message, "error"));
+                }
             } catch (err) {
-                toast(err.message, "error");
-                running = false;
+                if (active()) {
+                    toast(err.message, "error");
+                    running = false;
+                }
                 return;
             }
-            if (!running) return;
+            if (!active()) return;
         }
 
         let answered = 0;
-        for (let i = 1; i <= total && running; i++) {
+        for (let i = 1; i <= total && active(); i++) {
             const target = await waitFor(() => targetFor(i), 5000);
             if (!target) {
                 toast(`Q${i}: not found, skipped`, "error");
@@ -300,11 +407,12 @@ if (!globalThis.__hbAutomateLoaded) {
             }
             try {
                 // Questions that only appear after navigating get solved one at a time
-                if (answers[i] === undefined && !key) {
+                if (answers[i] === undefined && !key && !asked.has(i)) {
+                    asked.add(i);
                     const [answer] = await solveQuestions([extractQuestion(i, target)]);
                     if (answer !== null) answers[i] = answer;
                 }
-                if (!running) break;
+                if (!active()) break;
                 toast(`Q${i}: ${applyAnswer(i, target, answers[i])}`);
                 answered++;
             } catch (err) {
@@ -314,7 +422,7 @@ if (!globalThis.__hbAutomateLoaded) {
             await sleep(delay);
         }
 
-        if (!running) return;
+        if (!active()) return;
         running = false;
         toast(`Finished: answered ${answered} of ${total}`);
         if (autoSubmit && answered === total) {
