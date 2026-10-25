@@ -16,7 +16,7 @@
     "scripts": ["solver.js", "background.js"]
   },
   "permissions": ["scripting", "activeTab", "storage", "clipboardWrite"],
-  "host_permissions": ["https://generativelanguage.googleapis.com/*", "*://*.hitbullseye.com/*"],
+  "host_permissions": ["https://generativelanguage.googleapis.com/*", "<all_urls>"],
   "action": {
     "default_popup": "./popup/popup.html",
     "default_icon": "./images/icon.svg"

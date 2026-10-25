@@ -166,11 +166,37 @@ if (!globalThis.__hbAutomateLoaded) {
         }
     }
 
+    // MathJax 3's rendered math as MathML, so mathToText can read it. Its HTML output names elements after the
+    // MathML they show (<mjx-mfrac>, <mjx-msup>...) and its SVG output says so in data-mml-node; the characters are
+    // in <mjx-c> (as text, or only as a class like "mjx-c35" for "5") or in <use data-c="35">
+    // (A numerator, denominator or power holds several items side by side, so it's read as one group)
+    const MJX_NODE = (n) =>
+        n.getAttribute("data-mml-node") ||
+        (/^mjx-m(?!ath$)[a-z]+$/.test(n.localName) ? n.localName.slice(4) : null) ||
+        (/^mjx-(num|den)$/.test(n.localName) || (n.localName === "mjx-script" && /^mjx-msu[bp]$/.test(n.parentElement?.localName)) ? "mrow" : null);
+    function mjxToMathML(node, name = "mrow") {
+        const el = document.createElementNS("http://www.w3.org/1998/Math/MathML", name);
+        if (/^(mi|mn|mo|mtext|ms)$/.test(name)) {
+            el.textContent = [...node.querySelectorAll("mjx-c, use[data-c], text")]
+                .map((c) => {
+                    const code = c.getAttribute("data-c") || (c.textContent ? null : String(c.className).match(/mjx-c([0-9A-F]+)/)?.[1]);
+                    return code ? String.fromCodePoint(parseInt(code, 16)) : c.textContent;
+                })
+                .join("")
+                .normalize("NFKC"); // math italic 𝑥 -> x
+            return el;
+        }
+        // Its MathML children: the nearest descendants that stand for MathML elements, skipping layout wrappers
+        const walk = (n) => [...n.children].flatMap((c) => (MJX_NODE(c) ? [c] : walk(c)));
+        for (const c of walk(node)) el.append(mjxToMathML(c, MJX_NODE(c)));
+        return el;
+    }
+
     // Text of an element with math kept readable: 180<sup>0</sup> -> "180^0" instead of "1800",
     // 2<sup>1</sup>/<sub>3</sub> -> "2 1/3" (a mixed fraction), stacked fractions -> "a/b", and images
     // either as their alt text or as "[image N]" when `imageIndex` says image N is attached for that <img>
     function readableText(el, imageIndex = []) {
-        if (!el.querySelector || !el.querySelector("sup, sub, math, img, table, br, [style*=border], [style*=overline], [style*=vertical-align], [class*=frac], script")) {
+        if (!el.querySelector || !el.querySelector("sup, sub, math, mjx-container, img, svg, canvas, [data-hb-figure], table, br, [style*=border], [style*=overline], [style*=vertical-align], [class*=frac], script")) {
             return normalizeMath(el.innerText || el.textContent);
         }
         const copy = el.cloneNode(true);
@@ -181,10 +207,14 @@ if (!globalThis.__hbAutomateLoaded) {
         });
         copy.querySelectorAll("script, style, noscript, template").forEach((n) => n.remove());
         // Rendered copies of math that's also kept as a source or as MathML (KaTeX's visible half repeats its MathML)
-        copy.querySelectorAll(".MathJax_Preview, .MathJax, .MathJax_Display, .MathJax_SVG, .MathJax_CHTML, .MathJax_MathML, .katex-html").forEach((n) => n.remove());
+        // (MathJax 3 puts the class "MathJax" on its <mjx-container> too, but keeps no other copy, so that one stays)
+        copy.querySelectorAll(".MathJax_Preview, .MathJax:not(mjx-container), .MathJax_Display, .MathJax_SVG, .MathJax_CHTML, .MathJax_MathML, .katex-html").forEach((n) => n.remove());
+        // MathJax 3: its hidden MathML copy for screen readers when there is one, else the rendered math itself
+        // (whose plain text runs a mixed fraction 51 1/5 together into "5115")
         copy.querySelectorAll("mjx-container").forEach((n) => {
             const math = n.querySelector("math");
-            n.replaceWith(math ? ` ${mathToText(math)} ` : n.textContent);
+            const rendered = n.querySelector("mjx-math, [data-mml-node=math]");
+            n.replaceWith(` ${math ? mathToText(math) : rendered ? mathToText(mjxToMathML(rendered)) : n.textContent} `);
         });
         copy.querySelectorAll("math").forEach((n) => n.replaceWith(` ${mathToText(n)} `));
         const short = (n) => n.textContent.trim().length <= 20;
@@ -309,20 +339,27 @@ if (!globalThis.__hbAutomateLoaded) {
             n.prepend(gap);
             n.append(gap);
         });
-        const imgs = [...copy.querySelectorAll("img")];
-        imgs.forEach((n, k) => {
+        // Figures (tagged by extractQuestion) become "[image N]", or UNREADABLE when they couldn't be read; a picture
+        // set as an element's background gets the marker put in front of the element instead of replacing it
+        const meaningful = (alt) => alt && !/^(image|img|pic|photo)?\s*\d*$/i.test(alt);
+        copy.querySelectorAll("img, [data-hb-figure]").forEach((n) => {
             const alt = (n.getAttribute("alt") || n.getAttribute("title") || "").trim();
-            if (imageIndex[k] === -1) n.replaceWith(` ${alt && !/^(image|img|pic|photo)?\s*\d*$/i.test(alt) ? alt : UNREADABLE} `);
-            else if (imageIndex[k] !== undefined) n.replaceWith(` [image ${imageIndex[k] + 1}${alt ? `: ${alt}` : ""}] `);
-            else if (alt && !/^(image|img|pic|photo)?\s*\d*$/i.test(alt)) n.replaceWith(` ${alt} `);
+            const k = imageIndex[n.getAttribute("data-hb-figure")];
+            let marker = null;
+            if (k === -1) marker = meaningful(alt) ? alt : UNREADABLE;
+            else if (k !== undefined) marker = `[image ${k + 1}${alt ? `: ${alt}` : ""}]`;
+            else if (n.nodeName === "IMG" && meaningful(alt)) marker = alt;
+            if (marker === null) return;
+            if (FIGURE_TAGS.test(n.nodeName)) n.replaceWith(` ${marker} `);
+            else n.prepend(` ${marker} `);
         });
         return normalizeMath(copy.textContent);
     }
 
-    // `imagesOf(el)` gives the attached-image number for each <img> inside el, so an option shown as a
-    // picture (often a fraction) reads "[image N]" and the AI can look at it instead of seeing nothing
-    function optionText(radio, name, imagesOf = () => []) {
-        const read = (el) => clean(readableText(el, imagesOf(el)));
+    // `imageIndex` (from extractQuestion) gives the attached-image number of each figure, so an option shown as
+    // a picture (often a fraction) reads "[image N]" and the AI can look at it instead of seeing nothing
+    function optionText(radio, name, imageIndex = []) {
+        const read = (el) => clean(readableText(el, imageIndex));
         if (radio.id) {
             const label = document.querySelector(`label[for="${CSS.escape(radio.id)}"]`);
             if (label && read(label)) return read(label);
@@ -343,17 +380,91 @@ if (!globalThis.__hbAutomateLoaded) {
         }
         const option = document.createElement("span");
         option.append(...nodes.map((n) => n.cloneNode(true)));
-        const images = nodes.filter((n) => n.nodeType === Node.ELEMENT_NODE).flatMap(imagesOf);
         // Nothing readable: the page's own value ("a", "b"...) says nothing, so tell the AI the option is a picture
-        return clean(readableText(option, images)) || (radio.value.length > 1 ? radio.value : UNREADABLE);
+        return clean(readableText(option, imageIndex)) || (radio.value.length > 1 ? radio.value : UNREADABLE);
     }
 
     const UNREADABLE = "[picture that could not be read]";
+    // Elements that are a picture themselves (the rest of the figures are pictures set as a CSS background)
+    const FIGURE_TAGS = /^(IMG|SVG|CANVAS|INPUT|OBJECT|EMBED)$/i;
+
+    // Everything in `block` the question may show as a picture, in page order: <img>, drawings (<svg>, <canvas>),
+    // embedded pictures, and elements with no text whose CSS background is a picture
+    function findFigures(block) {
+        // (MathJax's SVG output is math, read as text, not a figure)
+        const figures = [...block.querySelectorAll("img, svg, canvas, input[type=image], object, embed")].filter(
+            (n) => !n.parentElement?.closest("svg") && !n.closest("mjx-container")
+        );
+        for (const n of block.querySelectorAll("*")) {
+            if (!figures.includes(n) && !n.closest("svg") && !n.textContent.trim() && /url\(/.test(getComputedStyle(n).backgroundImage)) {
+                figures.push(n);
+            }
+        }
+        return figures.sort((a, b) => (a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1));
+    }
+
+    // A figure as a PNG data URL: "" for one too small to matter (an icon or spacer), null when it can't be read
+    async function figureToDataUrl(n) {
+        if (n.nodeName === "IMG") return imageToDataUrl(n);
+        if (n.nodeName.toLowerCase() === "svg") return svgToDataUrl(n);
+        if (n.nodeName === "CANVAS") {
+            try {
+                return n.width < 24 || n.height < 24 ? "" : n.toDataURL("image/png");
+            } catch {
+                return null; // drawn from another site's pictures, can't read it
+            }
+        }
+        const url =
+            n.nodeName === "INPUT" || n.nodeName === "EMBED" ? n.src
+            : n.nodeName === "OBJECT" ? n.data
+            : getComputedStyle(n).backgroundImage.match(/url\(["']?(.*?)["']?\)/)?.[1];
+        if (!url) return "";
+        const img = new Image();
+        img.src = new URL(url, location.href).href;
+        return imageToDataUrl(img);
+    }
+
+    // An inline <svg> drawing as a PNG. The page's stylesheets don't come along with a copy of it, so the
+    // styles that decide how it looks are written onto each of its elements first
+    async function svgToDataUrl(svg) {
+        const box = svg.getBoundingClientRect();
+        const viewBox = svg.viewBox?.baseVal;
+        const width = box.width || viewBox?.width || parseFloat(svg.getAttribute("width")) || 0;
+        const height = box.height || viewBox?.height || parseFloat(svg.getAttribute("height")) || 0;
+        if (width < 24 || height < 24) return ""; // an icon
+        const copy = svg.cloneNode(true);
+        const originals = [svg, ...svg.querySelectorAll("*")];
+        [copy, ...copy.querySelectorAll("*")].forEach((c, k) => {
+            const style = getComputedStyle(originals[k]);
+            for (const p of ["fill", "stroke", "stroke-width", "stroke-dasharray", "opacity", "fill-opacity", "font-size", "font-family", "font-weight", "text-anchor"]) {
+                c.style.setProperty(p, style.getPropertyValue(p));
+            }
+        });
+        copy.setAttribute("xmlns", "http://www.w3.org/2000/svg");
+        copy.setAttribute("width", width);
+        copy.setAttribute("height", height);
+        const img = new Image();
+        img.src = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(new XMLSerializer().serializeToString(copy))}`;
+        try {
+            await img.decode();
+            return drawImage(img);
+        } catch {
+            return null;
+        }
+    }
 
     // An <img> as a PNG data URL for the AI: "" for one too small to matter (a spacer or icon), null when it can't
     // be read. One the page can't hand over (from another site, or not loaded yet because its question is hidden)
     // is downloaded again by the background script, which is allowed to fetch it
     async function imageToDataUrl(img) {
+        // Lazy-loading pages show a placeholder and keep the real address in a data- attribute until the
+        // picture scrolls into view, which a hidden question never does
+        const lazy = ["data-src", "data-original", "data-lazy-src", "data-url"].map((a) => img.getAttribute(a)).find(Boolean);
+        if (lazy && new URL(lazy, location.href).href !== img.src) {
+            const real = new Image();
+            real.src = new URL(lazy, location.href).href;
+            return imageToDataUrl(real);
+        }
         if (img.complete && img.naturalWidth && (img.naturalWidth < 8 || img.naturalHeight < 8)) return "";
         const drawn = img.complete && img.naturalWidth ? drawImage(img) : null;
         if (drawn) return drawn;
@@ -404,18 +515,18 @@ if (!globalThis.__hbAutomateLoaded) {
             block = block.parentElement;
         }
 
-        // Images are attached after the question, and "[image N]" in the text marks where each one sits
-        // (or UNREADABLE where one couldn't be read, so the AI knows something is missing)
+        // Figures are attached after the question, and "[image N]" in the text marks where each one sits (or
+        // UNREADABLE where one couldn't be read, so the AI knows something is missing). Each figure is tagged with
+        // its number so the text can find it again in the copies readableText works on
         const images = [];
-        const blockImages = [...block.querySelectorAll("img")];
-        const dataUrls = await Promise.all(blockImages.map(imageToDataUrl));
+        const figures = findFigures(block);
+        const dataUrls = await Promise.all(figures.map(figureToDataUrl));
         const imageIndex = dataUrls.map((dataUrl) => {
             if (dataUrl === null) return -1;
             return dataUrl && images.length < MAX_IMAGES ? images.push(dataUrl) - 1 : undefined;
         });
-        const imagesOf = (el) =>
-            (el.nodeName === "IMG" ? [el] : [...el.querySelectorAll("img")]).map((img) => imageIndex[blockImages.indexOf(img)]);
-        const options = target.kind === "mcq" ? target.radios.map((r) => optionText(r, name, imagesOf)) : [];
+        figures.forEach((n, k) => n.setAttribute("data-hb-figure", k));
+        const options = target.kind === "mcq" ? target.radios.map((r) => optionText(r, name, imageIndex)) : [];
         return { text: cleanLines(readableText(block, imageIndex)).slice(0, 8000), options, images };
     }
 
