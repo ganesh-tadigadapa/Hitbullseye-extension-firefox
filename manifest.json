@@ -1,7 +1,7 @@
 {
   "name": "Hitbullseye Automate Tool",
   "version": "4.0.0",
-  "description": "AI-powered auto-solver for hitbullseye.com tests: answers multiple-choice and numerical questions with Gemini or Claude.",
+  "description": "AI-powered auto-solver for hitbullseye.com tests: answers multiple-choice and numerical questions with Gemini.",
   "author": "ethical hacker",
   "default_locale": "en",
   "manifest_version": 3,
@@ -16,7 +16,7 @@
     "scripts": ["solver.js", "background.js"]
   },
   "permissions": ["scripting", "activeTab", "storage", "clipboardWrite"],
-  "host_permissions": ["https://api.anthropic.com/*", "https://generativelanguage.googleapis.com/*"],
+  "host_permissions": ["https://generativelanguage.googleapis.com/*", "*://*.hitbullseye.com/*"],
   "action": {
     "default_popup": "./popup/popup.html",
     "default_icon": "./images/icon.svg"

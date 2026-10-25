@@ -1,7 +1,6 @@
 // Shared by the background script, the content script and the popup.
-// Sends multiple-choice questions to Gemini or Claude and returns the chosen option index for each.
+// Sends multiple-choice questions to Gemini and returns the chosen option index for each.
 globalThis.HBSolver = globalThis.HBSolver || (() => {
-    const CLAUDE_MODEL = "claude-opus-5-5";
     // Each Gemini model has its own free-tier daily quota, so when one runs out we move to the next.
     // Fastest first, by measured speed on a 17-question aptitude set (all of these scored 17/17):
     // 3.6-flash 17s, 3-flash-preview 21s, 3.5-flash 28s. gemini-3.8-flash scored the same but took
@@ -23,18 +22,20 @@ globalThis.HBSolver = globalThis.HBSolver || (() => {
 The question text was scraped from a web page, so it may include stray page text; ignore anything that is not part of the question.
 Work each problem carefully and check your result against its options. Return one answer letter per question, in the same order as the questions.
 Notation used in the scraped text:
-- "^" marks a superscript from the page: 180^0 means 180 degrees, 21^st means 21st, x^2 means x squared.
+- "^" marks a superscript (a power) from the page: x^2 means x squared, 2^(n+1) means 2 to the power n+1, 2^(2^3) means 2 to the power 8; 180^0 means 180 degrees and 21^st means 21st.
+- "_" marks a subscript: log_(2)8 means log base 2 of 8, x_1 is x sub 1.
 - A whole number followed by a space and a fraction is a mixed fraction: "2 1/3" means 2 + 1/3 = 7/3, never 2 x 1/3. Options are often mixed fractions too, so compare exact values.
-- "\\frac{a}{b}" is TeX for a/b; "sqrt(x)" and "√(x)" are the square root of x.
+- "\\frac{a}{b}" is TeX for a/b; "sqrt(x)" and "√(x)" are the square root of x; "root3(8)" is the cube root of 8.
 - Digits in brackets right after a decimal are recurring: 0.1(6) means 0.1666..., 0.(3) means 0.333...
-- "[image N]" marks where attached image N (a figure, formula or fraction shown as a picture) appears in the question.`;
+- "[image N]" marks where attached image N (a figure, formula or fraction shown as a picture) appears in the question.
+- "[picture that could not be read]" marks a picture (often a fraction, a number or a whole option) that is missing. Work out what it most likely was from the rest of the question and the other options; if this is a well-known question, use its standard values. Still give your best answer.`;
 
     // Gemini Flash reasons internally before replying, so the reply itself only needs the answers:
     // asking it to also write out its working makes the response several times longer (and slower)
     const GEMINI_INSTRUCTIONS = `For each question: solve it carefully in your reasoning, and verify the result a second way (plug the answer back in, recount, or use a different method) before choosing. If your result matches no option exactly, pick "None of these" when it is offered, otherwise the closest option.
-Questions marked "numerical answer" have no options: work out the number and give it as a plain number (digits, optional minus sign and decimal point; no units, no commas; convert a fraction or mixed fraction to a decimal; round to 2 decimal places only if the question doesn't say otherwise).
-Do not write out your working. Reply with only this one line (letters for multiple-choice, numbers for numerical answers):
-ANSWERS: 1=B, 2=D, 3=42.5`;
+Questions marked "numerical answer" have no options: work out the number and give it as a plain number (digits, optional minus sign and decimal point; no units, no commas; convert a fraction, mixed fraction or power to a decimal, e.g. 1500 rather than 1.5 × 10^3; round to 2 decimal places only if the question doesn't say otherwise).
+Do not write out your working. Reply with only this one line (letters for multiple-choice, numbers for numerical answers). When a multiple-choice answer is a number, put the value you worked out in brackets after the letter, e.g. 1=B (7/3):
+ANSWERS: 1=B (7/3), 2=D, 3=42.5`;
 
     // If the current model hasn't answered by then, ask the next one too: 12s plus 2s per question.
     // A healthy model takes about 1-2s per question, and the free tier allows only ~20 requests a day
@@ -52,7 +53,7 @@ ANSWERS: 1=B, 2=D, 3=42.5`;
     class QuotaError extends Error {}
 
     function checkKey(apiKey) {
-        if (!apiKey) throw new Error("Set your Gemini or Anthropic API key in the extension popup");
+        if (!apiKey) throw new Error("Set your Gemini API key in the extension popup");
         if (apiKey.length > 200 || !/^[\x21-\x7e]+$/.test(apiKey)) {
             throw new Error("The API key box contains something that isn't a key. Clear it and paste only your key.");
         }
@@ -144,14 +145,17 @@ ANSWERS: 1=B, 2=D, 3=42.5`;
 
     let lastModel = null;
 
-    // Reads "ANSWERS: 1=B, 2=D, 3=42.5" (the last such line) into ["B", "D", "42.5"]
+    // Reads "ANSWERS: 1=B, 2=D, 3=42.5" (the last such line) into ["B", "D", "42.5"]. Each answer runs up to
+    // the next "N=", so one like "2 1/3" or "1.5 × 10^3" comes through whole. A model that leaves out the
+    // "ANSWERS:" label still counts if a line starts "1=..."
     function parseAnswerLine(text, count) {
-        const lines = text.split("\n").filter((l) => /ANSWERS\s*:/i.test(l));
+        let lines = text.split("\n").filter((l) => /ANSWERS\s*:/i.test(l));
+        if (!lines.length) lines = text.split("\n").filter((l) => /^\W*1\s*=\s*\S/.test(l));
         if (!lines.length) return null;
         const answers = new Array(count).fill(null);
-        const line = lines[lines.length - 1].replace(/^.*?ANSWERS\s*:/i, "");
-        for (const [, n, value] of line.matchAll(/(\d+)\s*=\s*\(?(-?\d*\.?\d+(?:\s+\d+\s*\/\s*\d+|\s*\/\s*\d+)?|[A-Z])\b\)?/gi)) {
-            if (n >= 1 && n <= count) answers[n - 1] = value.toUpperCase();
+        const line = lines[lines.length - 1].replace(/^.*?ANSWERS\s*:/i, "").replace(/\*\*|`/g, "");
+        for (const [, n, value] of line.matchAll(/(\d+)\s*=\s*(.+?)\s*(?=[,;]?\s+\d+\s*=|[,;]\s*\d+\s*=|[,;.]?\s*$)/g)) {
+            if (n >= 1 && n <= count) answers[n - 1] = value;
         }
         return answers.some(Boolean) ? answers : null;
     }
@@ -170,10 +174,11 @@ ANSWERS: 1=B, 2=D, 3=42.5`;
                 systemInstruction: { parts: [{ text: SYSTEM_PROMPT + "\n\n" + GEMINI_INSTRUCTIONS }] },
                 contents: [{ role: "user", parts }],
                 // Lite models don't think unless asked: on 20 aptitude questions 3.5-flash-lite scored 17/20
-                // without thinking and 20/20 with it. Gemini 2.5 models take a different setting, so they keep theirs.
+                // without thinking and 20/20 with it. Gemini 2.5 models take a thinking budget instead (-1: as much
+                // as the question needs), which 2.5-flash-lite otherwise defaults to 0
                 generationConfig: {
                     maxOutputTokens: 32768,
-                    ...(model.startsWith("gemini-2") ? {} : { thinkingConfig: { thinkingLevel: "high" } }),
+                    thinkingConfig: model.startsWith("gemini-2") ? { thinkingBudget: -1 } : { thinkingLevel: "high" },
                 },
             }),
         });
@@ -185,7 +190,8 @@ ANSWERS: 1=B, 2=D, 3=42.5`;
         const answers = parseAnswerLine(text, schema.count);
         if (!answers) {
             const reason = data.candidates?.[0]?.finishReason || data.promptFeedback?.blockReason || "no ANSWERS line";
-            throw new Error(`Gemini didn't return answers (${reason})`);
+            // Marked like a 403 so the next model is asked: another model usually replies in the right format
+            throw Object.assign(new Error(`Gemini didn't return answers (${reason})`), { status: 403 });
         }
         return answers;
     }
@@ -278,66 +284,49 @@ ANSWERS: 1=B, 2=D, 3=42.5`;
         throw lastError;
     }
 
-    async function askClaude(apiKey, content, schema) {
-        const res = await fetch("https://api.anthropic.com/v1/messages", {
-            method: "POST",
-            signal: AbortSignal.timeout(600000),
-            headers: {
-                "content-type": "application/json",
-                "x-api-key": apiKey,
-                "anthropic-version": "2023-06-01",
-                "anthropic-beta": "server-side-fallback-2026-07-01",
-                "anthropic-dangerous-direct-browser-access": "true",
-            },
-            body: JSON.stringify({
-                model: CLAUDE_MODEL,
-                max_tokens: 32000,
-                fallbacks: "default",
-                output_config: {
-                    effort: "high",
-                    format: {
-                        type: "json_schema",
-                        schema: {
-                            type: "object",
-                            properties: {
-                                answers: {
-                                    type: "array",
-                                    description: "One per question: the option letter, or for numerical-answer questions the plain number",
-                                    items: { type: "string" },
-                                },
-                            },
-                            required: ["answers"],
-                            additionalProperties: false,
-                        },
-                    },
-                },
-                system: SYSTEM_PROMPT,
-                messages: [{ role: "user", content }],
-            }),
-        });
-
-        const message = await checkResponse(res);
-        if (message.stop_reason === "refusal") throw new Error("Claude declined these questions");
-        if (message.stop_reason === "max_tokens") throw new Error("Answer was cut off");
-        const textBlock = message.content.find((block) => block.type === "text");
-        if (!textBlock) throw new Error("Empty response from Claude");
-        lastModel = CLAUDE_MODEL;
-        return JSON.parse(textBlock.text).answers;
-    }
-
-    // A numerical answer as a plain number string: "2 1/3" -> "2.33", "-7/4" -> "-1.75", "42.5 cm" -> "42.5"
+    // A numerical answer as a plain number string: "2 1/3" -> "2.33", "-7/4" -> "-1.75", "42.5 cm" -> "42.5",
+    // ".5" -> "0.5", and powers: "1.5e3", "1.5 × 10^3" or "1.5×10³" -> "1500", "2^10" -> "1024", "10^-3" -> "0.001"
     function toNumber(value) {
-        const v = value.replace(/,/g, "").trim();
+        const v = value
+            .replace(/,/g, "")
+            .replace(/[−–]/g, "-")
+            .replace(/[⁰¹²³⁴⁵⁶⁷⁸⁹⁺⁻]+/g, (s) => `^(${[...s].map((ch) => "0123456789+-"["⁰¹²³⁴⁵⁶⁷⁸⁹⁺⁻".indexOf(ch)]).join("")})`)
+            .trim();
         const mixed = v.match(/^(-?)(\d+)\s+(\d+)\s*\/\s*(\d+)/);
         const simple = v.match(/^(-?\d*\.?\d+)\s*\/\s*(\d*\.?\d+)/);
+        const scientific = v.match(/^(-?\d*\.?\d+)\s*(?:[x×*·]\s*10\s*\^|e)\s*\(?\s*([-+]?\d+)\s*\)?/i);
+        const power = v.match(/^(-?)(\d*\.?\d+)\s*\^\s*\(?\s*([-+]?\d*\.?\d+)\s*\)?/);
         let n;
         if (mixed) n = (mixed[1] ? -1 : 1) * (Number(mixed[2]) + Number(mixed[3]) / Number(mixed[4]));
         else if (simple) n = Number(simple[1]) / Number(simple[2]);
+        else if (scientific) n = Number(`${scientific[1]}e${scientific[2]}`);
+        else if (power) n = (power[1] ? -1 : 1) * Number(power[2]) ** Number(power[3]);
         else {
-            const plain = v.replace(/[^\d.-]/g, "").replace(/^(-?)\./, "$10."); // ".5" -> "0.5"
-            return /^-?\d*\.?\d+$/.test(plain) ? plain : null;
+            // The first number in it ("Rs.500" -> 500, not .500)
+            const plain = v.match(/-?(?:\d+\.?\d*|(?<![A-Za-z])\.\d+)/);
+            return plain ? String(Number(plain[0])) : null;
         }
-        return Number.isFinite(n) ? String(Math.round(n * 100) / 100) : null;
+        // Rounded to 2 decimals, but a small value like 2.5 × 10^-3 keeps its digits instead of becoming 0
+        return Number.isFinite(n) ? String(Math.round(n * 100) / 100 || Number(n.toPrecision(3))) : null;
+    }
+
+    // Option index for a multiple-choice answer like "B", "(B)" or "B (7/3)", or -1. The bracket holds the value
+    // the AI worked out: when option B is a different number but exactly one other option is that value, the AI
+    // slipped picking the letter, so the option matching its working is chosen
+    function pickOption(options, value) {
+        const letter = value.match(/^\(?([A-Z])(?![A-Z])/i);
+        const index = letter ? letter[1].toUpperCase().charCodeAt(0) - 65 : -1;
+        const worked = value.match(/\(([^()]*)\)\s*$/);
+        const target = worked && toNumber(worked[1]);
+        if (target === null || target === undefined) return index;
+        // Options that are just a number: "42", "-3", "2 1/3", "3/4", "12.5%"
+        const values = options.map((o) =>
+            /^[-−–]?\s*[\d.,]+(\s+\d+\s*\/\s*\d+|\s*\/\s*[\d.]+)?\s*%?$/.test(o.trim()) ? Number(toNumber(o)) : null
+        );
+        const close = (x) => x !== null && Math.abs(x - Number(target)) < 0.011;
+        const matches = values.flatMap((x, i) => (close(x) ? [i] : []));
+        const letterIsOtherNumber = index < 0 || index >= options.length || (values[index] !== null && !close(values[index]));
+        return matches.length === 1 && letterIsOtherNumber ? matches[0] : index;
     }
 
     // Answers already worked out, so clicking Start again (or retaking a test) doesn't spend requests on them.
@@ -410,31 +399,26 @@ ANSWERS: 1=B, 2=D, 3=42.5`;
     }
 
     async function requestAnswers(questions, apiKey, maxRetries) {
-        const isClaude = apiKey.startsWith("sk-ant-");
         const content = [];
         questions.forEach((q, n) => {
             const options = q.options.map((opt, i) => `${String.fromCharCode(65 + i)}) ${opt}`).join("\n");
             const text = q.options.length
                 ? `Question ${n + 1}:\n${q.text}\n\nOptions:\n${options}\n`
                 : `Question ${n + 1} (numerical answer, no options):\n${q.text}\n`;
-            content.push(isClaude ? { type: "text", text } : { text });
+            content.push({ text });
             for (const dataUrl of q.images || []) {
                 const [, mediaType, data] = dataUrl.match(/^data:(.+?);base64,(.*)$/);
-                content.push(
-                    isClaude
-                        ? { type: "image", source: { type: "base64", media_type: mediaType, data } }
-                        : { inline_data: { mime_type: mediaType, data } }
-                );
+                content.push({ inline_data: { mime_type: mediaType, data } });
             }
         });
         const closing = `Answer all ${questions.length} question(s): give exactly ${questions.length} answer(s), in question order.`;
-        content.push(isClaude ? { type: "text", text: closing } : { text: closing });
+        content.push({ text: closing });
 
         const schema = answerSchema(Math.max(1, ...questions.map((q) => q.options.length)), questions.length);
         let answers;
         try {
             answers = await withRetry(
-                (attempt) => (isClaude ? askClaude(apiKey, content, schema) : askGemini(apiKey, content, schema, attempt > 0)),
+                (attempt) => askGemini(apiKey, content, schema, attempt > 0),
                 maxRetries
             );
         } catch (err) {
@@ -449,7 +433,7 @@ ANSWERS: 1=B, 2=D, 3=42.5`;
             if (!q.options.length) {
                 return toNumber(value);
             }
-            const index = /^[A-Z]$/i.test(value) ? value.toUpperCase().charCodeAt(0) - 65 : -1;
+            const index = pickOption(q.options, value);
             return index >= 0 && index < q.options.length ? index : null;
         });
     }
@@ -463,27 +447,16 @@ ANSWERS: 1=B, 2=D, 3=42.5`;
     // Quick key check: lists the models the key can use instead of solving a question, so it answers in about a second
     async function testKey(apiKey) {
         checkKey(apiKey);
-        const isClaude = apiKey.startsWith("sk-ant-");
         try {
-            const res = isClaude
-                ? await fetch("https://api.anthropic.com/v1/models?limit=1", {
-                      signal: AbortSignal.timeout(10000),
-                      headers: {
-                          "x-api-key": apiKey,
-                          "anthropic-version": "2023-06-01",
-                          "anthropic-dangerous-direct-browser-access": "true",
-                      },
-                  })
-                : await fetch("https://generativelanguage.googleapis.com/v1beta/models?pageSize=1", {
-                      signal: AbortSignal.timeout(10000),
-                      headers: { "x-goog-api-key": apiKey },
-                  });
+            const res = await fetch("https://generativelanguage.googleapis.com/v1beta/models?pageSize=1", {
+                signal: AbortSignal.timeout(10000),
+                headers: { "x-goog-api-key": apiKey },
+            });
             await checkResponse(res);
         } catch (err) {
             if (err.name === "TimeoutError") throw new Error("No answer within 10 seconds. Check your internet and try again.");
             throw err;
         }
-        return isClaude ? "Claude" : "Gemini";
     }
 
     return { solve, solveAll, checkKey, testKey, lastModel: () => lastModel };

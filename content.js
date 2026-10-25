@@ -17,7 +17,8 @@ if (!globalThis.__hbAutomateLoaded) {
         }
 
         if (request.message === "extract") {
-            sendResponse(exportQuestions());
+            exportQuestions().then(sendResponse);
+            return true; // keep the channel open for the async response
         } else if (request.message === "start") {
             if (running) {
                 sendResponse({ error: "Already running" });
@@ -41,6 +42,10 @@ if (!globalThis.__hbAutomateLoaded) {
 
     const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     const clean = (s) => (s || "").replace(/\s+/g, " ").trim();
+    // Like clean, but keeps line breaks (and tabs between table cells), so a number at the end of one line and a
+    // fraction starting the next don't run together into what reads as a mixed fraction
+    const cleanLines = (s) =>
+        (s || "").replace(/[^\S\n\t]+/g, " ").replace(/\s*\n\s*/g, "\n").replace(/[ \t]*\t[ \t]*/g, "\t").trim();
     const radiosFor = (i) => [...document.querySelectorAll(`input[type="radio"][name="radio_${i}"]`)];
 
     const MAX_IMAGES = 12; // per question
@@ -102,30 +107,42 @@ if (!globalThis.__hbAutomateLoaded) {
         "½": "1/2", "⅓": "1/3", "⅔": "2/3", "¼": "1/4", "¾": "3/4", "⅕": "1/5", "⅖": "2/5", "⅗": "3/5", "⅘": "4/5",
         "⅙": "1/6", "⅚": "5/6", "⅐": "1/7", "⅛": "1/8", "⅜": "3/8", "⅝": "5/8", "⅞": "7/8", "⅑": "1/9", "⅒": "1/10",
     };
-    const SUPERSCRIPT_DIGITS = "⁰¹²³⁴⁵⁶⁷⁸⁹";
-    const SUBSCRIPT_DIGITS = "₀₁₂₃₄₅₆₇₈₉";
-    const plainDigits = (s, set) => [...s].map((ch) => set.indexOf(ch)).join("");
+    // Unicode superscript/subscript characters and the plain characters they stand for
+    const SUPERSCRIPTS = ["⁰¹²³⁴⁵⁶⁷⁸⁹⁺⁻⁼⁽⁾ⁿⁱ", "0123456789+-=()ni"];
+    const SUBSCRIPTS = ["₀₁₂₃₄₅₆₇₈₉₊₋₌₍₎ₐₑₒₓₙ", "0123456789+-=()aeoxn"];
+    const plainScript = (s, [from, to]) => [...s].map((ch) => to[from.indexOf(ch)]).join("");
+
+    // A power as text: "^2" (or "_2" for a subscript), but "^(n+1)" when it's more than one number or word, or
+    // when `after` (the text that follows it) would run into it: 2ˣ3ʸ -> "2^(x)3^y", log₂8 -> "log_(2)8"
+    const script = (mark, p, after = "") => `${mark}${/^\w+$/.test(p) && !/^\w/.test(after) ? p : `(${p})`}`;
 
     // Plain-text math the page may use: "2⅓" -> "2 1/3", "¹⁄₃" -> "1/3", fraction slash -> "/",
-    // TeX "2\frac{1}{3}" -> "2 1/3"
+    // "x²" -> "x^2", "10⁻³" -> "10^(-3)", TeX "2\frac{1}{3}" -> "2 1/3"
     function normalizeMath(text) {
+        // Innermost \frac first, so \frac{\frac{1}{2}}{3} -> (1/2)/3; "\frac13" is TeX shorthand for \frac{1}{3}
+        for (let prev; prev !== text; ) {
+            prev = text;
+            text = text.replace(/\\[dt]?frac\s*(?:\{([^{}]*)\}|(\w))\s*(?:\{([^{}]*)\}|(\w))/g, (_, a, a1, b, b1) =>
+                fraction(a ?? a1, b ?? b1)
+            );
+        }
         return text
-            .replace(/\\[dt]?frac\s*\{([^{}]*)\}\s*\{([^{}]*)\}/g, (_, a, b) => fraction(a, b))
+            .replace(/[\u2061-\u2064]/g, "") // MathML's invisible operators, e.g. between 2 and 1/3 in 2⅓
             .replace(/(\d?)\s*([½⅓⅔¼¾⅕⅖⅗⅘⅙⅚⅐⅛⅜⅝⅞⅑⅒])/g, (_, whole, f) => (whole ? `${whole} ` : " ") + VULGAR_FRACTIONS[f])
-            .replace(/([⁰¹²³⁴⁵⁶⁷⁸⁹]+)\s*[⁄/]\s*([₀₁₂₃₄₅₆₇₈₉]+)/g, (_, a, b) =>
-                ` ${plainDigits(a, SUPERSCRIPT_DIGITS)}/${plainDigits(b, SUBSCRIPT_DIGITS)}`
+            .replace(/([⁰¹²³⁴⁵⁶⁷⁸⁹]+)\s*[⁄∕/]\s*([₀₁₂₃₄₅₆₇₈₉]+)/g, (_, a, b) =>
+                ` ${plainScript(a, SUPERSCRIPTS)}/${plainScript(b, SUBSCRIPTS)}`
             )
-            .replace(/⁄/g, "/");
+            .replace(/[⁄∕]/g, "/")
+            .replace(/[⁰¹²³⁴⁵⁶⁷⁸⁹⁺⁻⁼⁽⁾ⁿⁱ]+(?=(\w?))/g, (s, after) => script("^", plainScript(s, SUPERSCRIPTS), after))
+            .replace(/[₀₁₂₃₄₅₆₇₈₉₊₋₌₍₎ₐₑₒₓₙ]+(?=(\w?))/g, (s, after) => script("_", plainScript(s, SUBSCRIPTS), after));
     }
 
     // A fraction as text: " 2/7 ", or " (x+1)/(x-1) " when a part is more than one number or word, so that
     // a whole number right before it reads as a mixed fraction ("5 2/7") rather than a multiplication
-    const fraction = (a, b) => {
-        const wrap = (p) => (/^[\w.]+$/.test(p.trim()) ? p.trim() : `(${p.trim()})`);
-        return ` ${wrap(a)}/${wrap(b)} `;
-    };
+    const group = (p) => (/^([\w.]+|\([^()]*\))$/.test(p.trim()) ? p.trim() : `(${p.trim()})`);
+    const fraction = (a, b) => ` ${group(a)}/${group(b)} `;
 
-    // MathML (also what MathJax 3 keeps for screen readers) as plain text
+    // MathML (also what MathJax 3 and KaTeX keep for screen readers) as plain text
     function mathToText(node) {
         const kids = [...node.children];
         const t = (n) => (n ? mathToText(n) : "");
@@ -133,8 +150,16 @@ if (!globalThis.__hbAutomateLoaded) {
             case "mfrac": return fraction(t(kids[0]), t(kids[1]));
             case "msqrt": return `sqrt(${kids.map(t).join("")})`;
             case "mroot": return `root${t(kids[1])}(${t(kids[0])})`;
-            case "msup": return `${t(kids[0])}^(${t(kids[1])})`;
-            case "msub": return `${t(kids[0])}_(${t(kids[1])})`;
+            case "msup": return `${group(t(kids[0]))}^(${t(kids[1])})`;
+            case "msub": case "munder": return `${group(t(kids[0]))}_(${t(kids[1])})`;
+            case "msubsup": case "munderover": return `${group(t(kids[0]))}_(${t(kids[1])})^(${t(kids[2])})`;
+            // A bar over digits marks them as recurring: 0.1(6)
+            case "mover":
+                return /^\d+$/.test(t(kids[0]).trim()) && /^[¯‾_―—–-]$/.test(t(kids[1]).trim()) ? `(${t(kids[0]).trim()})` : kids.map(t).join("");
+            case "mfenced": {
+                const [open, close, separators] = ["open", "close", "separators"].map((a) => node.getAttribute(a));
+                return `${open ?? "("}${kids.map(t).join((separators ?? ",").trim().charAt(0))}${close ?? ")"}`;
+            }
             case "annotation": case "annotation-xml": return "";
             case "semantics": return t(kids[0]);
             default: return kids.length ? kids.map(t).join("") : node.textContent;
@@ -145,24 +170,103 @@ if (!globalThis.__hbAutomateLoaded) {
     // 2<sup>1</sup>/<sub>3</sub> -> "2 1/3" (a mixed fraction), stacked fractions -> "a/b", and images
     // either as their alt text or as "[image N]" when `imageIndex` says image N is attached for that <img>
     function readableText(el, imageIndex = []) {
-        if (!el.querySelector || !el.querySelector("sup, sub, math, img, table, br, [style*=border], [style*=overline], [class*=frac], script[type^='math/tex']")) {
+        if (!el.querySelector || !el.querySelector("sup, sub, math, img, table, br, [style*=border], [style*=overline], [style*=vertical-align], [class*=frac], script")) {
             return normalizeMath(el.innerText || el.textContent);
         }
         const copy = el.cloneNode(true);
-        // MathJax 2 keeps the TeX source in a script tag next to the rendered copy: use the source
-        copy.querySelectorAll("script[type^='math/tex']").forEach((n) => n.replaceWith(` ${n.textContent} `));
-        copy.querySelectorAll(".MathJax_Preview, .MathJax, .MathJax_Display, .MathJax_SVG, .MathJax_CHTML").forEach((n) => n.remove());
+        // MathJax 2 keeps the source (TeX, AsciiMath or MathML) in a script tag next to the rendered copy: use the source
+        copy.querySelectorAll("script[type^='math/']").forEach((n) => {
+            const mml = /mml/.test(n.type) && new DOMParser().parseFromString(n.textContent, "text/html").querySelector("math");
+            n.replaceWith(` ${mml ? mathToText(mml) : n.textContent} `);
+        });
+        copy.querySelectorAll("script, style, noscript, template").forEach((n) => n.remove());
+        // Rendered copies of math that's also kept as a source or as MathML (KaTeX's visible half repeats its MathML)
+        copy.querySelectorAll(".MathJax_Preview, .MathJax, .MathJax_Display, .MathJax_SVG, .MathJax_CHTML, .MathJax_MathML, .katex-html").forEach((n) => n.remove());
         copy.querySelectorAll("mjx-container").forEach((n) => {
             const math = n.querySelector("math");
             n.replaceWith(math ? ` ${mathToText(math)} ` : n.textContent);
         });
         copy.querySelectorAll("math").forEach((n) => n.replaceWith(` ${mathToText(n)} `));
         const short = (n) => n.textContent.trim().length <= 20;
-        // Fractions built from elements: <span class="frac"><span>1</span><span>3</span></span>. Innermost
-        // first, so a "mixed-fraction" wrapper around the whole number and a "frac" isn't read as 2/13
+        const isSlash = (n) => /^\s*[/⁄∕]\s*$/.test(n.textContent);
+
+        // Superscripts and subscripts styled on a span rather than written as <sup>/<sub>
+        copy.querySelectorAll("[style*=vertical-align]").forEach((n) => {
+            const tag = { super: "sup", sub: "sub" }[n.style.verticalAlign];
+            if (!tag) return;
+            const replacement = document.createElement(tag);
+            replacement.append(...n.childNodes);
+            n.replaceWith(replacement);
+        });
+        // Fractions written with sup and sub: 2<sup>1</sup>/<sub>3</sub> -> "2 1/3" (a mixed fraction). The slash can
+        // also sit inside either one, or be left out when both are numbers
+        copy.querySelectorAll("sup").forEach((sup) => {
+            if (!copy.contains(sup)) return;
+            const between = [];
+            let sub = sup.nextSibling;
+            while (sub && (sub.nodeType === Node.TEXT_NODE || sub.nodeName === "SPAN") && (!sub.textContent.trim() || isSlash(sub))) {
+                between.push(sub);
+                sub = sub.nextSibling;
+            }
+            if (!sub || sub.nodeName !== "SUB") return;
+            const [a, b] = [sup.textContent.trim(), sub.textContent.trim()];
+            const [num, den] = [a.replace(/[/⁄∕]$/, ""), b.replace(/^[/⁄∕]/, "")];
+            const slashed = between.some(isSlash) || num !== a || den !== b;
+            if (num && den && (slashed || (/^\d+$/.test(num) && /^\d+$/.test(den)))) {
+                [...between, sub].forEach((n) => n.remove());
+                sup.replaceWith(fraction(num, den));
+            }
+        });
+        // A bar over something right after √ is the root's bar: √(a+b). Over digits right after a number
+        // it marks recurring digits: 0.1(6) = 0.1666...
+        const textBefore = (n) => {
+            let prev = n.previousSibling;
+            while (prev && !prev.textContent.trim()) prev = prev.previousSibling;
+            return prev ? prev.textContent.trim() : "";
+        };
+        copy.querySelectorAll("[style*=border-top], [style*=overline]").forEach((n) => {
+            const t = n.textContent.trim();
+            if (/√$/.test(textBefore(n)) || (/\.\d*$/.test(textBefore(n)) && /^\d+$/.test(t))) n.replaceWith("(", ...n.childNodes, ")");
+        });
+        // Other superscripts are powers and subscripts indices: x<sup>2</sup> -> "x^2", log<sub>2</sub>8 -> "log_(2)8".
+        // Innermost first, so 2<sup>2<sup>3</sup></sup> -> "2^(2^3)". A number raised just before √ is the root's
+        // index: <sup>3</sup>√8 -> "root3(8)"
+        const textAfter = (n) => {
+            // Text after the end of a line, block or table cell doesn't run into it
+            for (let x = n; x && x !== copy && !/^(P|DIV|LI|TD|TH|H\d)$/.test(x.nodeName); x = x.parentNode) {
+                for (let next = x.nextSibling; next && next.nodeName !== "BR"; next = next.nextSibling) {
+                    if (next.textContent) return next.textContent;
+                }
+            }
+            return "";
+        };
+        [...copy.querySelectorAll("sup, sub")].reverse().forEach((n) => {
+            const p = n.textContent.trim();
+            const next = n.nextSibling;
+            const before = n.previousSibling?.nodeType === Node.TEXT_NODE ? n.previousSibling.textContent : "";
+            if (!p) {
+                n.remove();
+            } else if (n.nodeName === "SUP" && /^\d+\s*[/⁄∕]\s*\d+$/.test(p) && /\d\s+$/.test(before)) {
+                // A raised fraction after a whole number and a space is a mixed fraction: 8 <sup>2/3</sup> -> "8 2/3"
+                const [a, b] = p.split(/[/⁄∕]/);
+                n.replaceWith(fraction(a, b));
+            } else if (n.nodeName === "SUP" && /^\d+$/.test(p) && next?.nodeType === Node.TEXT_NODE && /^\s*√/.test(next.textContent)) {
+                next.textContent = next.textContent.replace(/^\s*√\s*([\w.]+)?/, (_, x) => (x ? `(${x})` : ""));
+                n.replaceWith(`root${p}`);
+            } else {
+                n.replaceWith(script(n.nodeName === "SUP" ? "^" : "_", p, textAfter(n)));
+            }
+        });
+        // Fractions built from elements: <span class="frac"><span>1</span><span>3</span></span>, maybe with the whole
+        // number first: <span class="mixed"><span>2</span><span>1</span><span>3</span></span>. Innermost first,
+        // so a "mixed-fraction" wrapper around the whole number and a "frac" isn't read as 2/13
         [...copy.querySelectorAll("[class*=frac]")].reverse().forEach((n) => {
-            const parts = [...n.children].filter((c) => c.textContent.trim() && !/^[/⁄]$/.test(c.textContent.trim()));
-            if (parts.length === 2 && parts.every(short)) n.replaceWith(fraction(parts[0].textContent, parts[1].textContent));
+            const parts = [...n.children].filter((c) => c.textContent.trim() && !isSlash(c));
+            const withWhole = parts.length === 3 && /^\d+$/.test(parts[0].textContent.trim());
+            if ((parts.length !== 2 && !withWhole) || !parts.every(short)) return;
+            const [num, den] = parts.slice(-2);
+            num.replaceWith(fraction(num.textContent, den.textContent));
+            n.replaceWith(...[...n.childNodes].filter((c) => c !== den && !isSlash(c)));
         });
         // Fractions laid out as a table: numerator over denominator, optionally with the whole number
         // of a mixed fraction in a cell spanning both rows
@@ -175,18 +279,6 @@ if (!globalThis.__hbAutomateLoaded) {
             } else if (top.length === 2 && top[0].rowSpan === 2 && bottom.length === 1) {
                 n.replaceWith(` ${top[0].textContent.trim()} ${fraction(top[1].textContent, bottom[0].textContent)}`);
             }
-        });
-        // A bar over something right after √ is the root's bar: √(a+b). Over digits right after a number
-        // it marks recurring digits: 0.1(6) = 0.1666...
-        const textBefore = (n) => {
-            let prev = n.previousSibling;
-            while (prev && !prev.textContent.trim()) prev = prev.previousSibling;
-            return prev ? prev.textContent.trim() : "";
-        };
-        copy.querySelectorAll("[style*=border-top], [style*=overline]").forEach((n) => {
-            const t = n.textContent.trim();
-            if (/√$/.test(textBefore(n))) n.replaceWith(`(${t})`);
-            else if (/\.\d*$/.test(textBefore(n)) && /^\d+$/.test(t)) n.replaceWith(`(${t})`);
         });
         // Fractions stacked with a border as the fraction bar: the numerator has a bottom border
         // or the denominator a top border
@@ -209,22 +301,22 @@ if (!globalThis.__hbAutomateLoaded) {
                 parent.replaceWith(fraction(kids[0].textContent, kids[2].textContent));
             }
         });
-        // textContent runs lines and blocks together ("Statement IStatement II"), so keep them apart
+        // textContent runs lines and blocks together ("Statement IStatement II", or "Question No. 5" and a
+        // "3/4 of..." below it into the mixed fraction "5 3/4"), so keep them on lines of their own
         copy.querySelectorAll("br").forEach((n) => n.replaceWith("\n"));
-        copy.querySelectorAll("p, div, li, tr, td, th, h1, h2, h3, h4, h5, h6").forEach((n) => n.append(" "));
+        copy.querySelectorAll("p, div, li, tr, td, th, h1, h2, h3, h4, h5, h6").forEach((n) => {
+            const gap = n.nodeName === "TD" || n.nodeName === "TH" ? "\t" : "\n";
+            n.prepend(gap);
+            n.append(gap);
+        });
         const imgs = [...copy.querySelectorAll("img")];
         imgs.forEach((n, k) => {
             const alt = (n.getAttribute("alt") || n.getAttribute("title") || "").trim();
-            if (imageIndex[k] !== undefined) n.replaceWith(` [image ${imageIndex[k] + 1}${alt ? `: ${alt}` : ""}] `);
+            if (imageIndex[k] === -1) n.replaceWith(` ${alt && !/^(image|img|pic|photo)?\s*\d*$/i.test(alt) ? alt : UNREADABLE} `);
+            else if (imageIndex[k] !== undefined) n.replaceWith(` [image ${imageIndex[k] + 1}${alt ? `: ${alt}` : ""}] `);
             else if (alt && !/^(image|img|pic|photo)?\s*\d*$/i.test(alt)) n.replaceWith(` ${alt} `);
         });
-        // Mixed/simple fractions written with sup and sub: 2<sup>1</sup>/<sub>3</sub> -> "2 1/3"
-        copy.querySelectorAll("sup").forEach((n) => n.replaceWith(`^{${n.textContent.trim()}}`));
-        copy.querySelectorAll("sub").forEach((n) => n.replaceWith(`_{${n.textContent.trim()}}`));
-        let text = copy.textContent.replace(/\^\{([^}]*)\}\s*[/⁄]?\s*_\{([^}]*)\}/g, " $1/$2");
-        text = text.replace(/\^\{([^}]*)\}/g, (_, p) => (/^\w+$/.test(p) ? `^${p}` : `^(${p})`));
-        text = text.replace(/_\{([^}]*)\}/g, (_, p) => (/^\w+$/.test(p) ? `_${p}` : `_(${p})`));
-        return normalizeMath(text);
+        return normalizeMath(copy.textContent);
     }
 
     // `imagesOf(el)` gives the attached-image number for each <img> inside el, so an option shown as a
@@ -243,33 +335,63 @@ if (!globalThis.__hbAutomateLoaded) {
         }
         if (read(el)) return read(el);
 
-        // Options laid out as "<input> text <br> <input> text ..." in one container
-        let text = "";
-        for (let node = radio.nextSibling; node; node = node.nextSibling) {
-            if (node.nodeName === "INPUT" || node.nodeName === "BR") break;
-            if (node.nodeName === "IMG") {
-                const [k] = imagesOf(node);
-                text += k !== undefined ? ` [image ${k + 1}] ` : ` ${node.alt || ""} `;
-            } else text += node.nodeType === Node.ELEMENT_NODE ? readableText(node, imagesOf(node)) : node.textContent;
+        // Options laid out as "<input> text <br> <input> text ..." in one container. The nodes are read together,
+        // since a mixed fraction or power spans several of them: 2<sup>1</sup>/<sub>3</sub>
+        const nodes = [];
+        for (let node = radio.nextSibling; node && node.nodeName !== "INPUT" && node.nodeName !== "BR"; node = node.nextSibling) {
+            nodes.push(node);
         }
-        return clean(text) || radio.value;
+        const option = document.createElement("span");
+        option.append(...nodes.map((n) => n.cloneNode(true)));
+        const images = nodes.filter((n) => n.nodeType === Node.ELEMENT_NODE).flatMap(imagesOf);
+        // Nothing readable: the page's own value ("a", "b"...) says nothing, so tell the AI the option is a picture
+        return clean(readableText(option, images)) || (radio.value.length > 1 ? radio.value : UNREADABLE);
     }
 
-    function imageToDataUrl(img) {
+    const UNREADABLE = "[picture that could not be read]";
+
+    // An <img> as a PNG data URL for the AI: "" for one too small to matter (a spacer or icon), null when it can't
+    // be read. One the page can't hand over (from another site, or not loaded yet because its question is hidden)
+    // is downloaded again by the background script, which is allowed to fetch it
+    async function imageToDataUrl(img) {
+        if (img.complete && img.naturalWidth && (img.naturalWidth < 8 || img.naturalHeight < 8)) return "";
+        const drawn = img.complete && img.naturalWidth ? drawImage(img) : null;
+        if (drawn) return drawn;
+        const src = img.currentSrc || img.src;
+        if (!/^(https?|data|blob):/.test(src)) return null;
         try {
-            // Small images are kept too: tests often show fractions and formulas as little inline pictures
-            if (!img.complete || img.naturalWidth < 8 || img.naturalHeight < 8) return null;
+            const { dataUrl } = await chrome.runtime.sendMessage({ type: "fetchImage", url: src });
+            if (!dataUrl) return null;
+            const copy = new Image();
+            copy.src = dataUrl;
+            await copy.decode();
+            return copy.naturalWidth < 8 || copy.naturalHeight < 8 ? "" : drawImage(copy);
+        } catch {
+            return null;
+        }
+    }
+
+    function drawImage(img) {
+        try {
+            // Small images are kept too: tests often show fractions and formulas as little inline pictures.
+            // A fraction picture can be only ~20px tall, too few pixels to tell a 3 from an 8: enlarge it (up to 4x)
+            const scale = Math.min(4, Math.max(1, 80 / img.naturalHeight));
             const canvas = document.createElement("canvas");
-            canvas.width = img.naturalWidth;
-            canvas.height = img.naturalHeight;
-            canvas.getContext("2d").drawImage(img, 0, 0);
+            canvas.width = Math.round(img.naturalWidth * scale);
+            canvas.height = Math.round(img.naturalHeight * scale);
+            const ctx = canvas.getContext("2d");
+            // Transparent pictures (black text on nothing) can reach the AI as black on black, so put them on white
+            ctx.fillStyle = "#fff";
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+            ctx.imageSmoothingQuality = "high";
+            ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
             return canvas.toDataURL("image/png");
         } catch {
             return null; // cross-origin image, can't read it
         }
     }
 
-    function extractQuestion(i, target = targetFor(i)) {
+    async function extractQuestion(i, target = targetFor(i)) {
         const name = `radio_${i}`;
         const inputs = target.kind === "mcq" ? target.radios : [target.box];
 
@@ -283,19 +405,21 @@ if (!globalThis.__hbAutomateLoaded) {
         }
 
         // Images are attached after the question, and "[image N]" in the text marks where each one sits
+        // (or UNREADABLE where one couldn't be read, so the AI knows something is missing)
         const images = [];
         const blockImages = [...block.querySelectorAll("img")];
-        const imageIndex = blockImages.map((img) => {
-            const dataUrl = images.length < MAX_IMAGES ? imageToDataUrl(img) : null;
-            return dataUrl ? images.push(dataUrl) - 1 : undefined;
+        const dataUrls = await Promise.all(blockImages.map(imageToDataUrl));
+        const imageIndex = dataUrls.map((dataUrl) => {
+            if (dataUrl === null) return -1;
+            return dataUrl && images.length < MAX_IMAGES ? images.push(dataUrl) - 1 : undefined;
         });
         const imagesOf = (el) =>
             (el.nodeName === "IMG" ? [el] : [...el.querySelectorAll("img")]).map((img) => imageIndex[blockImages.indexOf(img)]);
         const options = target.kind === "mcq" ? target.radios.map((r) => optionText(r, name, imagesOf)) : [];
-        return { text: clean(readableText(block, imageIndex)).slice(0, 8000), options, images };
+        return { text: cleanLines(readableText(block, imageIndex)).slice(0, 8000), options, images };
     }
 
-    function exportQuestions() {
+    async function exportQuestions() {
         const total = countQuestions();
         const parts = [];
         let missing = 0;
@@ -305,7 +429,7 @@ if (!globalThis.__hbAutomateLoaded) {
                 missing++;
                 continue;
             }
-            const q = extractQuestion(i, target);
+            const q = await extractQuestion(i, target);
             const diagram = q.images.length ? " [has a diagram, not included]" : "";
             if (target.kind === "mcq") {
                 const options = q.options.map((opt, j) => `${String.fromCharCode(65 + j)}) ${opt}`).join("\n");
@@ -416,7 +540,7 @@ if (!globalThis.__hbAutomateLoaded) {
             }
             toast(`Solving ${present.length} questions...`);
             const solveInto = async (list) => {
-                const result = await solveQuestions(list.map(([i, target]) => extractQuestion(i, target)));
+                const result = await solveQuestions(await Promise.all(list.map(([i, target]) => extractQuestion(i, target))));
                 list.forEach(([i], n) => {
                     asked.add(i);
                     if (result[n] !== null && result[n] !== undefined) answers[i] = result[n];
@@ -454,7 +578,7 @@ if (!globalThis.__hbAutomateLoaded) {
                 // Questions that only appear after navigating get solved one at a time
                 if (answers[i] === undefined && !key && !asked.has(i)) {
                     asked.add(i);
-                    const [answer] = await solveQuestions([extractQuestion(i, target)]);
+                    const [answer] = await solveQuestions([await extractQuestion(i, target)]);
                     if (answer !== null) answers[i] = answer;
                 }
                 if (!active()) break;
