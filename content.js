@@ -209,6 +209,9 @@ if (!globalThis.__hbAutomateLoaded) {
                 parent.replaceWith(fraction(kids[0].textContent, kids[2].textContent));
             }
         });
+        // textContent runs lines and blocks together ("Statement IStatement II"), so keep them apart
+        copy.querySelectorAll("br").forEach((n) => n.replaceWith("\n"));
+        copy.querySelectorAll("p, div, li, tr, td, th, h1, h2, h3, h4, h5, h6").forEach((n) => n.append(" "));
         const imgs = [...copy.querySelectorAll("img")];
         imgs.forEach((n, k) => {
             const alt = (n.getAttribute("alt") || n.getAttribute("title") || "").trim();
