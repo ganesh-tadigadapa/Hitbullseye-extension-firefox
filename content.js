@@ -157,15 +157,17 @@ if (!globalThis.__hbAutomateLoaded) {
             n.replaceWith(math ? ` ${mathToText(math)} ` : n.textContent);
         });
         copy.querySelectorAll("math").forEach((n) => n.replaceWith(` ${mathToText(n)} `));
-        // Fractions built from elements: <span class="frac"><span>1</span><span>3</span></span>
-        copy.querySelectorAll("[class*=frac]").forEach((n) => {
+        const short = (n) => n.textContent.trim().length <= 20;
+        // Fractions built from elements: <span class="frac"><span>1</span><span>3</span></span>. Innermost
+        // first, so a "mixed-fraction" wrapper around the whole number and a "frac" isn't read as 2/13
+        [...copy.querySelectorAll("[class*=frac]")].reverse().forEach((n) => {
             const parts = [...n.children].filter((c) => c.textContent.trim() && !/^[/⁄]$/.test(c.textContent.trim()));
-            if (parts.length === 2 && parts.every((c) => c.textContent.trim().length <= 20)) n.replaceWith(fraction(parts[0].textContent, parts[1].textContent));
+            if (parts.length === 2 && parts.every(short)) n.replaceWith(fraction(parts[0].textContent, parts[1].textContent));
         });
         // Fractions laid out as a two-row, one-column table (numerator over denominator)
         copy.querySelectorAll("table").forEach((n) => {
             const rows = [...n.rows];
-            if (!n.querySelector("input, img") && rows.length === 2 && rows.every((r) => r.cells.length === 1 && r.textContent.trim().length <= 20)) {
+            if (!n.querySelector("input, img") && rows.length === 2 && rows.every((r) => r.cells.length === 1 && short(r))) {
                 n.replaceWith(fraction(rows[0].textContent, rows[1].textContent));
             }
         });
