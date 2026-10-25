@@ -5,17 +5,18 @@ globalThis.HBSolver = globalThis.HBSolver || (() => {
     // Each Gemini model has its own free-tier daily quota, so when one runs out we move to the next.
     // Fastest first, by measured speed on a 17-question aptitude set (all of these scored 17/17):
     // 3.6-flash 17s, 3-flash-preview 21s, 3.5-flash 28s. gemini-3.8-flash scored the same but took
-    // about 4 minutes, so it's only a late fallback. gemini-3.7-flash is left out: Google serves it with 3.8.
-    // Pro/Argon models have no free quota. Ones this key can't use fail fast and are remembered.
+    // about 4 minutes (and often doesn't answer at all), so it's the very last resort, after the lite
+    // models (3.5-flash-lite answered 10 questions in about 1s). gemini-3.7-flash is left out: Google
+    // serves it with 3.8. Pro/Argon models have no free quota. Ones this key can't use fail fast and are remembered.
     const GEMINI_MODELS = [
         "gemini-3.6-flash",
         "gemini-3-flash-preview",
         "gemini-3.5-flash",
-        "gemini-3.8-flash",
         "gemini-2.5-flash",
         "gemini-3.5-flash-lite",
         "gemini-3.1-flash-lite",
         "gemini-2.5-flash-lite",
+        "gemini-3.8-flash",
     ];
 
     const SYSTEM_PROMPT = `You solve multiple-choice aptitude questions (quant, reasoning, verbal, clocks, calendars, etc.) from an online practice test.
@@ -167,7 +168,12 @@ ANSWERS: 1=B, 2=D, 3=42.5`;
             body: JSON.stringify({
                 systemInstruction: { parts: [{ text: SYSTEM_PROMPT + "\n\n" + GEMINI_INSTRUCTIONS }] },
                 contents: [{ role: "user", parts }],
-                generationConfig: { maxOutputTokens: 32768 },
+                // Lite models don't think unless asked: on 20 aptitude questions 3.5-flash-lite scored 17/20
+                // without thinking and 20/20 with it. Gemini 2.5 models take a different setting, so they keep theirs.
+                generationConfig: {
+                    maxOutputTokens: 32768,
+                    ...(model.startsWith("gemini-2") ? {} : { thinkingConfig: { thinkingLevel: "high" } }),
+                },
             }),
         });
         const data = await checkResponse(res);
