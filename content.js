@@ -106,9 +106,11 @@ if (!globalThis.__hbAutomateLoaded) {
     const SUBSCRIPT_DIGITS = "₀₁₂₃₄₅₆₇₈₉";
     const plainDigits = (s, set) => [...s].map((ch) => set.indexOf(ch)).join("");
 
-    // Plain-text math the page may use: "2⅓" -> "2 1/3", "¹⁄₃" -> "1/3", fraction slash -> "/"
+    // Plain-text math the page may use: "2⅓" -> "2 1/3", "¹⁄₃" -> "1/3", fraction slash -> "/",
+    // TeX "2\frac{1}{3}" -> "2 1/3"
     function normalizeMath(text) {
         return text
+            .replace(/\\[dt]?frac\s*\{([^{}]*)\}\s*\{([^{}]*)\}/g, (_, a, b) => fraction(a, b))
             .replace(/(\d?)\s*([½⅓⅔¼¾⅕⅖⅗⅘⅙⅚⅐⅛⅜⅝⅞⅑⅒])/g, (_, whole, f) => (whole ? `${whole} ` : " ") + VULGAR_FRACTIONS[f])
             .replace(/([⁰¹²³⁴⁵⁶⁷⁸⁹]+)\s*[⁄/]\s*([₀₁₂₃₄₅₆₇₈₉]+)/g, (_, a, b) =>
                 ` ${plainDigits(a, SUPERSCRIPT_DIGITS)}/${plainDigits(b, SUBSCRIPT_DIGITS)}`
