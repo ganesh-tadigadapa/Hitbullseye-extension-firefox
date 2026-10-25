@@ -145,7 +145,7 @@ if (!globalThis.__hbAutomateLoaded) {
     // 2<sup>1</sup>/<sub>3</sub> -> "2 1/3" (a mixed fraction), stacked fractions -> "a/b", and images
     // either as their alt text or as "[image N]" when `imageIndex` says image N is attached for that <img>
     function readableText(el, imageIndex = []) {
-        if (!el.querySelector || !el.querySelector("sup, sub, math, img, table, [style*=border], [style*=overline], [class*=frac], script[type^='math/tex']")) {
+        if (!el.querySelector || !el.querySelector("sup, sub, math, img, table, br, [style*=border], [style*=overline], [class*=frac], script[type^='math/tex']")) {
             return normalizeMath(el.innerText || el.textContent);
         }
         const copy = el.cloneNode(true);
@@ -198,6 +198,16 @@ if (!globalThis.__hbAutomateLoaded) {
             const style = n.getAttribute("style") || "";
             const isBar = (/border-bottom/.test(style) && kids[0] === n) || (/border-top/.test(style) && kids[1] === n);
             if (kids.length === 2 && isBar && kids.every(short)) parent.replaceWith(fraction(kids[0].textContent, kids[1].textContent));
+        });
+        // Fractions stacked with a line break: <span style="display:inline-block"><u>1</u><br>3</span>
+        [...copy.querySelectorAll("br")].reverse().forEach((n) => {
+            const parent = n.parentElement;
+            if (!parent || !copy.contains(parent)) return;
+            const kids = parts(parent);
+            const stacked = /inline-block/.test(parent.getAttribute("style") || "") || kids[0]?.nodeName === "U";
+            if (kids.length === 3 && kids[1] === n && stacked && short(kids[0]) && short(kids[2])) {
+                parent.replaceWith(fraction(kids[0].textContent, kids[2].textContent));
+            }
         });
         const imgs = [...copy.querySelectorAll("img")];
         imgs.forEach((n, k) => {
