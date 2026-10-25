@@ -25,7 +25,8 @@ Work each problem carefully and check your result against its options. Return on
 Notation used in the scraped text:
 - "^" marks a superscript from the page: 180^0 means 180 degrees, 21^st means 21st, x^2 means x squared.
 - A whole number followed by a space and a fraction is a mixed fraction: "2 1/3" means 2 + 1/3 = 7/3, never 2 x 1/3. Options are often mixed fractions too, so compare exact values.
-- "\\frac{a}{b}" is TeX for a/b; "sqrt(x)" is the square root of x.
+- "\\frac{a}{b}" is TeX for a/b; "sqrt(x)" and "√(x)" are the square root of x.
+- Digits in brackets right after a decimal are recurring: 0.1(6) means 0.1666..., 0.(3) means 0.333...
 - "[image N]" marks where attached image N (a figure, formula or fraction shown as a picture) appears in the question.`;
 
     // Gemini Flash reasons internally before replying, so the reply itself only needs the answers:
