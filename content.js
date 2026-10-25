@@ -145,7 +145,7 @@ if (!globalThis.__hbAutomateLoaded) {
     // 2<sup>1</sup>/<sub>3</sub> -> "2 1/3" (a mixed fraction), stacked fractions -> "a/b", and images
     // either as their alt text or as "[image N]" when `imageIndex` says image N is attached for that <img>
     function readableText(el, imageIndex = []) {
-        if (!el.querySelector || !el.querySelector("sup, sub, math, img, table, [class*=frac], script[type^='math/tex']")) {
+        if (!el.querySelector || !el.querySelector("sup, sub, math, img, table, [style*=border], [style*=overline], [class*=frac], script[type^='math/tex']")) {
             return normalizeMath(el.innerText || el.textContent);
         }
         const copy = el.cloneNode(true);
@@ -175,6 +175,18 @@ if (!globalThis.__hbAutomateLoaded) {
             } else if (top.length === 2 && top[0].rowSpan === 2 && bottom.length === 1) {
                 n.replaceWith(` ${top[0].textContent.trim()} ${fraction(top[1].textContent, bottom[0].textContent)}`);
             }
+        });
+        // A bar over something right after √ is the root's bar: √(a+b). Over digits right after a number
+        // it marks recurring digits: 0.1(6) = 0.1666...
+        const textBefore = (n) => {
+            let prev = n.previousSibling;
+            while (prev && !prev.textContent.trim()) prev = prev.previousSibling;
+            return prev ? prev.textContent.trim() : "";
+        };
+        copy.querySelectorAll("[style*=border-top], [style*=overline]").forEach((n) => {
+            const t = n.textContent.trim();
+            if (/√$/.test(textBefore(n))) n.replaceWith(`(${t})`);
+            else if (/\.\d*$/.test(textBefore(n)) && /^\d+$/.test(t)) n.replaceWith(`(${t})`);
         });
         const imgs = [...copy.querySelectorAll("img")];
         imgs.forEach((n, k) => {
