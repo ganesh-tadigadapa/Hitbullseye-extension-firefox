@@ -34,10 +34,16 @@ Questions marked "numerical answer" have no options: work out the number and giv
 Do not write out your working. Reply with only this one line (letters for multiple-choice, numbers for numerical answers):
 ANSWERS: 1=B, 2=D, 3=42.5`;
 
-    // If the current model hasn't answered by then, ask the next one too: 20s plus 2s per question.
+    // If the current model hasn't answered by then, ask the next one too: 12s plus 2s per question.
     // A healthy model takes about 1-2s per question, and the free tier allows only ~20 requests a day
     // per model, so the backup should only start when the first model is clearly stuck.
-    const backupAfterMs = (count) => 20000 + 2000 * count;
+    const backupAfterMs = (count) => 12000 + 2000 * count;
+
+    // A request's time grows with its number of questions, so a big test is split into up to MAX_PARALLEL
+    // requests sent at once. Each request counts against the free tier's 20 a day per model, so chunks
+    // hold at least MIN_CHUNK questions: a 20-question test costs 2 requests, not 1 per few questions.
+    const MAX_PARALLEL = 3;
+    const MIN_CHUNK = 10;
     const SLOW_SKIP_MS = 30 * 60000; // a model that lost that race is skipped for 30 minutes
 
     class RetryableError extends Error {}
@@ -55,7 +61,7 @@ ANSWERS: 1=B, 2=D, 3=42.5`;
     async function withRetry(fn, maxRetries) {
         for (let attempt = 0; ; attempt++) {
             try {
-                return await fn();
+                return await fn(attempt);
             } catch (err) {
                 if (!(err instanceof RetryableError) || attempt >= maxRetries) throw err;
                 const wait = err.wait ? Math.min(err.wait + 1000, 65000) : 5000 * 2 ** attempt;
@@ -121,12 +127,17 @@ ANSWERS: 1=B, 2=D, 3=42.5`;
         }
     }
 
-    async function markExhausted(apiKey, model, wait) {
-        try {
-            const exhausted = await exhaustedModels(apiKey);
-            exhausted[model] = Date.now() + (wait || 24 * 3600000);
-            await chrome.storage.local.set({ [storageKeyFor(apiKey)]: exhausted });
-        } catch {}
+    // Parallel requests can mark models at the same moment, so updates run one after another
+    let marking = Promise.resolve();
+    function markExhausted(apiKey, model, wait) {
+        marking = marking.then(async () => {
+            try {
+                const exhausted = await exhaustedModels(apiKey);
+                exhausted[model] = Date.now() + (wait || 24 * 3600000);
+                await chrome.storage.local.set({ [storageKeyFor(apiKey)]: exhausted });
+            } catch {}
+        });
+        return marking;
     }
 
     let lastModel = null;
@@ -175,7 +186,7 @@ ANSWERS: 1=B, 2=D, 3=42.5`;
     // Asks the first available model. If it hasn't answered within backupAfterMs(), the next model
     // is asked too (at most two at once) and whichever answers first wins; a model that lost the race
     // is skipped for SLOW_SKIP_MS so the next Start goes straight to a fast model with a single request.
-    async function askGemini(apiKey, parts, schema) {
+    async function askGemini(apiKey, parts, schema, allowLite) {
         const exhausted = await exhaustedModels(apiKey);
         const models = GEMINI_MODELS.filter((m) => !(exhausted[m] > Date.now()));
         if (!models.length) {
@@ -185,10 +196,11 @@ ANSWERS: 1=B, 2=D, 3=42.5`;
         }
 
         // Flash-lite models are less accurate, so they're only used once every stronger model is used up for
-        // the day or unavailable, never just because a stronger one is briefly busy (that clears in seconds)
+        // the day or unavailable. A stronger one that's busy gets one retry first (`allowLite` is set on
+        // retries), since that often clears in seconds, but not more: waiting longer makes Start too slow.
         const isLite = (m) => m.includes("lite");
         const canLaunch = () =>
-            next < models.length && inFlight.size < 2 && !(busy && isLite(models[next]));
+            next < models.length && inFlight.size < 2 && !(busy && !allowLite && isLite(models[next]));
 
         const inFlight = new Map(); // model -> { done: promise of {model, answers} or {model, err}, controller }
         let next = 0;
@@ -360,7 +372,8 @@ ANSWERS: 1=B, 2=D, 3=42.5`;
 
     // questions: [{ text, options: [string], images: [dataUrl] }]
     // Returns one option index (or null if no valid answer) per question. Saved answers are reused and
-    // everything else goes to the AI in a single request (none at all if every question was answered before).
+    // everything else goes to the AI in a few parallel requests (none at all if every question was answered before).
+    // If only some requests fail, their questions come back null; if all fail, the first error is thrown.
     async function solveAll(questions, apiKey, maxRetries = 3) {
         checkKey(apiKey);
         const cache = await readCache();
@@ -371,10 +384,19 @@ ANSWERS: 1=B, 2=D, 3=42.5`;
             lastModel = "saved answers, no request used";
             return results;
         }
-        const fresh = await requestAnswers(todo.map((n) => questions[n]), apiKey, maxRetries);
-        todo.forEach((n, k) => {
-            results[n] = fresh[k];
-            if (fresh[k] !== null) cache[hashes[n]] = { a: fresh[k], t: Date.now() };
+        const size = Math.max(MIN_CHUNK, Math.ceil(todo.length / MAX_PARALLEL));
+        const chunks = [];
+        for (let k = 0; k < todo.length; k += size) chunks.push(todo.slice(k, k + size));
+        const settled = await Promise.allSettled(
+            chunks.map((chunk) => requestAnswers(chunk.map((n) => questions[n]), apiKey, maxRetries))
+        );
+        if (settled.every((s) => s.status === "rejected")) throw settled[0].reason;
+        settled.forEach((s, c) => {
+            if (s.status === "rejected") return;
+            chunks[c].forEach((n, k) => {
+                results[n] = s.value[k];
+                if (s.value[k] !== null) cache[hashes[n]] = { a: s.value[k], t: Date.now() };
+            });
         });
         await writeCache(cache);
         return results;
@@ -405,7 +427,7 @@ ANSWERS: 1=B, 2=D, 3=42.5`;
         let answers;
         try {
             answers = await withRetry(
-                () => (isClaude ? askClaude(apiKey, content, schema) : askGemini(apiKey, content, schema)),
+                (attempt) => (isClaude ? askClaude(apiKey, content, schema) : askGemini(apiKey, content, schema, attempt > 0)),
                 maxRetries
             );
         } catch (err) {

@@ -292,7 +292,7 @@ if (!globalThis.__hbAutomateLoaded) {
         }
     }
 
-    // Solves questions in one request; returns an option index (or null) per question
+    // Solves questions (split into parallel requests); returns an option index (or null) per question
     async function solveQuestions(questions) {
         const { apiKey } = await chrome.storage.local.get("apiKey");
         try {
@@ -363,13 +363,13 @@ if (!globalThis.__hbAutomateLoaded) {
             answers = parseKey(key, total);
             toast("Started attempting the test");
         } else {
-            // Send every question on the page in one request, so a whole test uses one API call
+            // Send every question on the page up front, split into a few requests that run at the same time
             const present = [];
             for (let i = 1; i <= total; i++) {
                 const target = targetFor(i);
                 if (target) present.push([i, target]);
             }
-            toast(`Solving ${present.length} questions in one request...`);
+            toast(`Solving ${present.length} questions...`);
             const solveInto = async (list) => {
                 const result = await solveQuestions(list.map(([i, target]) => extractQuestion(i, target)));
                 list.forEach(([i], n) => {
