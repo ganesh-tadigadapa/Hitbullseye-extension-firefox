@@ -334,7 +334,7 @@ ANSWERS: 1=B, 2=D, 3=42.5`;
         if (mixed) n = (mixed[1] ? -1 : 1) * (Number(mixed[2]) + Number(mixed[3]) / Number(mixed[4]));
         else if (simple) n = Number(simple[1]) / Number(simple[2]);
         else {
-            const plain = v.replace(/[^\d.-]/g, "");
+            const plain = v.replace(/[^\d.-]/g, "").replace(/^(-?)\./, "$10."); // ".5" -> "0.5"
             return /^-?\d*\.?\d+$/.test(plain) ? plain : null;
         }
         return Number.isFinite(n) ? String(Math.round(n * 100) / 100) : null;
