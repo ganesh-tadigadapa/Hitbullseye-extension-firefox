@@ -659,7 +659,10 @@ if (!globalThis.__hbAutomateLoaded) {
             };
             try {
                 await solveInto(present);
-                if (HBSolver.lastModel()) toast(`Solved with ${HBSolver.lastModel()}`);
+                // A lite model only answers once every strong one is used up for the day, and it's less accurate
+                const model = HBSolver.lastModel();
+                if (/lite/.test(model || "")) toast(`Solved with ${model}: a less accurate backup. Add another Gemini key for more accurate answers`, "error");
+                else if (model) toast(`Solved with ${model}`);
                 // Questions the AI skipped get one more try, all together in a single request
                 const skipped = present.filter(([i]) => answers[i] === undefined);
                 if (skipped.length && active()) {

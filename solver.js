@@ -52,10 +52,15 @@ ANSWERS: 1=B (7/3), 2=D, 3=42.5`;
     class RetryableError extends Error {}
     class QuotaError extends Error {}
 
+    // The key box may hold several Gemini keys (separated by commas, spaces or new lines). Each key has its own
+    // daily free quota, so with more keys the strong models are used up later and the less accurate lite ones
+    // are needed less
+    const keysOf = (apiKey) => apiKey.split(/[\s,;]+/).filter(Boolean);
+
     function checkKey(apiKey) {
-        if (!apiKey) throw new Error("Set your Gemini API key in the extension popup");
-        if (apiKey.length > 200 || !/^[\x21-\x7e]+$/.test(apiKey)) {
-            throw new Error("The API key box contains something that isn't a key. Clear it and paste only your key.");
+        if (!apiKey || !keysOf(apiKey).length) throw new Error("Set your Gemini API key in the extension popup");
+        if (keysOf(apiKey).some((key) => key.length > 200 || !/^[\x21-\x7e]+$/.test(key))) {
+            throw new Error("The API key box contains something that isn't a key. Clear it and paste only your key(s).");
         }
     }
 
@@ -200,12 +205,17 @@ ANSWERS: 1=B (7/3), 2=D, 3=42.5`;
     // is asked too (at most two at once) and whichever answers first wins; a model that lost the race
     // is skipped for SLOW_SKIP_MS so the next Start goes straight to a fast model with a single request.
     async function askGemini(apiKey, parts, schema, allowLite) {
-        const exhausted = await exhaustedModels(apiKey);
-        const models = GEMINI_MODELS.filter((m) => !(exhausted[m] > Date.now()));
+        // Every model on every key, model by model: all keys' strong models come before any lite model
+        const keys = keysOf(apiKey);
+        const exhausted = await Promise.all(keys.map(exhaustedModels));
+        const all = GEMINI_MODELS.flatMap((model) =>
+            keys.map((key, k) => ({ key, model, name: keys.length > 1 ? `${model} (key ${k + 1})` : model, until: exhausted[k][model] }))
+        );
+        const models = all.filter((c) => !(c.until > Date.now()));
         if (!models.length) {
-            const next = Math.min(...GEMINI_MODELS.map((m) => exhausted[m]));
+            const next = Math.min(...all.map((c) => c.until));
             const mins = Math.ceil((next - Date.now()) / 60000);
-            throw new Error(`Every Gemini model is used up or too slow right now. Try again in ~${mins} min.`);
+            throw new Error(`Every Gemini model is used up or too slow right now. Try again in ~${mins} min, or add another key.`);
         }
 
         // Flash-lite models are less accurate, so they're only used once every stronger model is used up for
@@ -213,15 +223,16 @@ ANSWERS: 1=B (7/3), 2=D, 3=42.5`;
         // retries), since that often clears in seconds, but not more: waiting longer makes Start too slow.
         const isLite = (m) => m.includes("lite");
         const canLaunch = () =>
-            next < models.length && inFlight.size < 2 && !(busy && !allowLite && isLite(models[next]));
+            next < models.length && inFlight.size < 2 && !(busy && !allowLite && isLite(models[next].model));
 
-        const inFlight = new Map(); // model -> { done: promise of {model, answers} or {model, err}, controller }
+        // model (a key and model pair from `models`) -> { done: promise of {model, answers} or {model, err}, controller }
+        const inFlight = new Map();
         let next = 0;
         let lastLaunch = 0;
         const launch = () => {
             const model = models[next++];
             const controller = new AbortController();
-            const done = callGemini(apiKey, model, parts, schema, controller.signal).then(
+            const done = callGemini(model.key, model.model, parts, schema, controller.signal).then(
                 (answers) => ({ model, answers }),
                 (err) => ({ model, err })
             );
@@ -250,23 +261,23 @@ ANSWERS: 1=B (7/3), 2=D, 3=42.5`;
             if (result.answers) {
                 // A model still running that was asked before the winner was too slow; one asked after it just lost
                 for (const model of inFlight.keys()) {
-                    if (models.indexOf(model) < models.indexOf(result.model)) await markExhausted(apiKey, model, SLOW_SKIP_MS);
+                    if (models.indexOf(model) < models.indexOf(result.model)) await markExhausted(model.key, model.model, SLOW_SKIP_MS);
                 }
                 stopAll();
-                lastModel = result.model;
+                lastModel = result.model.name;
                 return result.answers;
             }
 
             const err = (lastError = result.err);
             if (err instanceof QuotaError) {
-                await markExhausted(apiKey, result.model, err.wait);
+                await markExhausted(result.model.key, result.model.model, err.wait);
             } else if (err instanceof RetryableError) {
                 // overloaded right now (503) or briefly rate limited
                 if (err.wait) busyWait = busy && busyWait ? Math.min(busyWait, err.wait) : err.wait;
                 busy = true;
             } else if (err.status === 404) {
                 // Model doesn't exist (yet): skip it for a day instead of asking for it on every request
-                await markExhausted(apiKey, result.model, 24 * 3600000);
+                await markExhausted(result.model.key, result.model.model, 24 * 3600000);
             } else if (err.status !== 403) {
                 // 403 = not available for this key, so try the next one; anything else would fail on every model
                 stopAll();
@@ -447,16 +458,23 @@ ANSWERS: 1=B (7/3), 2=D, 3=42.5`;
     // Quick key check: lists the models the key can use instead of solving a question, so it answers in about a second
     async function testKey(apiKey) {
         checkKey(apiKey);
-        try {
-            const res = await fetch("https://generativelanguage.googleapis.com/v1beta/models?pageSize=1", {
-                signal: AbortSignal.timeout(10000),
-                headers: { "x-goog-api-key": apiKey },
-            });
-            await checkResponse(res);
-        } catch (err) {
-            if (err.name === "TimeoutError") throw new Error("No answer within 10 seconds. Check your internet and try again.");
-            throw err;
-        }
+        const keys = keysOf(apiKey);
+        await Promise.all(
+            keys.map(async (key, k) => {
+                try {
+                    const res = await fetch("https://generativelanguage.googleapis.com/v1beta/models?pageSize=1", {
+                        signal: AbortSignal.timeout(10000),
+                        headers: { "x-goog-api-key": key },
+                    });
+                    await checkResponse(res);
+                } catch (err) {
+                    const which = keys.length > 1 ? `Key ${k + 1}: ` : "";
+                    if (err.name === "TimeoutError") throw new Error(`${which}no answer within 10 seconds. Check your internet and try again.`);
+                    throw new Error(which + err.message);
+                }
+            })
+        );
+        return keys.length;
     }
 
     return { solve, solveAll, checkKey, testKey, lastModel: () => lastModel };

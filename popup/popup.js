@@ -35,8 +35,8 @@ document.addEventListener('DOMContentLoaded', function () {
         status("Testing key...");
         test_key.disabled = true;
         try {
-            await HBSolver.testKey(api_key.value.trim());
-            status("Key works ✅", "ok");
+            const count = await HBSolver.testKey(api_key.value.trim());
+            status(count > 1 ? `All ${count} keys work ✅` : "Key works ✅", "ok");
         } catch (err) {
             status(err.message, "error");
         } finally {
