@@ -6,13 +6,15 @@ document.addEventListener('DOMContentLoaded', function () {
     const api_key = document.getElementById("api_key");
     const test_key = document.getElementById("test_key");
     const auto_submit = document.getElementById("auto_submit");
+    const double_check = document.getElementById("double_check");
     const copy = document.getElementById("copy_questions");
     const time_value = document.getElementById("time_value");
     time_value.innerText = time.value + "s";
 
-    chrome.storage.local.get(["apiKey", "autoSubmit"]).then(({ apiKey, autoSubmit }) => {
+    chrome.storage.local.get(["apiKey", "autoSubmit", "doubleCheck"]).then(({ apiKey, autoSubmit, doubleCheck }) => {
         if (apiKey) api_key.value = apiKey;
         if (autoSubmit !== undefined) auto_submit.checked = autoSubmit;
+        if (doubleCheck !== undefined) double_check.checked = doubleCheck;
     });
 
     api_key.addEventListener("input", function () {
@@ -46,6 +48,10 @@ document.addEventListener('DOMContentLoaded', function () {
 
     auto_submit.addEventListener("change", function () {
         chrome.storage.local.set({ autoSubmit: auto_submit.checked });
+    });
+
+    double_check.addEventListener("change", function () {
+        chrome.storage.local.set({ doubleCheck: double_check.checked });
     });
 
     time.addEventListener("input", function () {

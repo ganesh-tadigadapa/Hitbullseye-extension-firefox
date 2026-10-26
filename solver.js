@@ -204,14 +204,20 @@ ANSWERS: 1=B (7/3), 2=D, 3=42.5`;
     // Asks the first available model. If it hasn't answered within backupAfterMs(), the next model
     // is asked too (at most two at once) and whichever answers first wins; a model that lost the race
     // is skipped for SLOW_SKIP_MS so the next Start goes straight to a fast model with a single request.
-    async function askGemini(apiKey, parts, schema, allowLite) {
-        // Every model on every key, model by model: all keys' strong models come before any lite model
+    // Every model on every key that isn't used up, model by model: all keys' strong models come before any lite one
+    async function candidates(apiKey) {
         const keys = keysOf(apiKey);
         const exhausted = await Promise.all(keys.map(exhaustedModels));
         const all = GEMINI_MODELS.flatMap((model) =>
             keys.map((key, k) => ({ key, model, name: keys.length > 1 ? `${model} (key ${k + 1})` : model, until: exhausted[k][model] }))
         );
-        const models = all.filter((c) => !(c.until > Date.now()));
+        return { all, models: all.filter((c) => !(c.until > Date.now())) };
+    }
+
+    // `prefer` names a model to ask first (the double-check asks a different model than the first answer's)
+    async function askGemini(apiKey, parts, schema, allowLite, prefer) {
+        const { all, models } = await candidates(apiKey);
+        if (prefer) models.sort((a, b) => (b.model === prefer) - (a.model === prefer));
         if (!models.length) {
             const next = Math.min(...all.map((c) => c.until));
             const mins = Math.ceil((next - Date.now()) / 60000);
@@ -265,7 +271,7 @@ ANSWERS: 1=B (7/3), 2=D, 3=42.5`;
                 }
                 stopAll();
                 lastModel = result.model.name;
-                return result.answers;
+                return Object.assign(result.answers, { model: result.model.model, modelName: result.model.name });
             }
 
             const err = (lastError = result.err);
@@ -395,7 +401,7 @@ ANSWERS: 1=B (7/3), 2=D, 3=42.5`;
         const chunks = [];
         for (let k = 0; k < todo.length; k += size) chunks.push(todo.slice(k, k + size));
         const settled = await Promise.allSettled(
-            chunks.map((chunk) => requestAnswers(chunk.map((n) => questions[n]), apiKey, maxRetries))
+            chunks.map((chunk) => checkedAnswers(chunk.map((n) => questions[n]), apiKey, maxRetries))
         );
         if (settled.every((s) => s.status === "rejected")) throw settled[0].reason;
         settled.forEach((s, c) => {
@@ -409,7 +415,7 @@ ANSWERS: 1=B (7/3), 2=D, 3=42.5`;
         return results;
     }
 
-    async function requestAnswers(questions, apiKey, maxRetries) {
+    async function requestAnswers(questions, apiKey, maxRetries, prefer) {
         const content = [];
         questions.forEach((q, n) => {
             const options = q.options.map((opt, i) => `${String.fromCharCode(65 + i)}) ${opt}`).join("\n");
@@ -429,7 +435,7 @@ ANSWERS: 1=B (7/3), 2=D, 3=42.5`;
         let answers;
         try {
             answers = await withRetry(
-                (attempt) => askGemini(apiKey, content, schema, attempt > 0),
+                (attempt) => askGemini(apiKey, content, schema, attempt > 0, prefer),
                 maxRetries
             );
         } catch (err) {
@@ -439,7 +445,7 @@ ANSWERS: 1=B (7/3), 2=D, 3=42.5`;
         if (!Array.isArray(answers)) throw new Error("Invalid response from the AI");
 
         // Multiple-choice -> option index; numerical -> number as a string; null if missing or invalid
-        return questions.map((q, n) => {
+        const picked = questions.map((q, n) => {
             const value = typeof answers[n] === "string" ? answers[n].trim() : "";
             if (!q.options.length) {
                 return toNumber(value);
@@ -447,6 +453,42 @@ ANSWERS: 1=B (7/3), 2=D, 3=42.5`;
             const index = pickOption(q.options, value);
             return index >= 0 && index < q.options.length ? index : null;
         });
+        return Object.assign(picked, { model: answers.model, modelName: answers.modelName });
+    }
+
+    // With "Double-check answers" on (the default), a batch goes to two different strong models at once, and the
+    // questions they disagree on go to a third model, which settles them: one model's reasoning slip is outvoted.
+    // A lite model never checks (or outvotes) a strong one, and the slow 3.8-flash isn't used as a checker
+    async function checkedAnswers(questions, apiKey, maxRetries) {
+        const { doubleCheck = true } = await chrome.storage.local.get("doubleCheck").catch(() => ({}));
+        const names = [...new Set((await candidates(apiKey)).models.map((c) => c.model))];
+        const isLite = (m) => m.includes("lite");
+        const checker = (used) =>
+            names.find((m) => !used.includes(m) && m !== "gemini-3.8-flash" && (isLite(names[0]) || !isLite(m)));
+        const second = doubleCheck && names.length && checker([names[0]]);
+        if (!second) return requestAnswers(questions, apiKey, maxRetries);
+
+        const [a, b] = await Promise.allSettled([
+            requestAnswers(questions, apiKey, maxRetries, names[0]),
+            requestAnswers(questions, apiKey, maxRetries, second),
+        ]);
+        if (a.status === "rejected" && b.status === "rejected") throw a.reason;
+        if (a.status === "rejected" || b.status === "rejected") return (a.status === "fulfilled" ? a : b).value;
+        const first = a.value;
+        const other = b.value;
+        // Numerical answers count as the same when they round to the same value
+        const same = (x, y) => x === y || (typeof x === "string" && typeof y === "string" && Math.abs(x - y) < 0.011);
+        const answers = first.map((x, n) => x ?? other[n]);
+        const disputed = answers.map((x, n) => n).filter((n) => first[n] !== null && other[n] !== null && !same(first[n], other[n]));
+        if (disputed.length) {
+            const third = checker([first.model, other.model]) || first.model;
+            const decider = await requestAnswers(disputed.map((n) => questions[n]), apiKey, maxRetries, third).catch(() => null);
+            disputed.forEach((n, k) => {
+                if (decider && same(decider[k], other[n])) answers[n] = other[n];
+            });
+        }
+        lastModel = `${first.modelName}, checked by ${other.modelName}${disputed.length ? ` (${disputed.length} settled by a third model)` : ""}`;
+        return answers;
     }
 
     async function solve(question, apiKey, maxRetries = 3) {
